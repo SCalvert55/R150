@@ -1,0 +1,226 @@
+#include <Arduino.h>
+
+//Start configuring
+
+#define NUM_VALVES 9 
+
+#define cyclesA 20 //write how many cycles you want here
+#define cyclesB 20 //write how many cycles you want here
+
+
+// Format: {pin, pulse time (ms), purge time (ms), solid state (true/false), 
+//open state (true/false), alternate valve(for solids), times repeated}
+int valveConfig[NUM_VALVES][NUM_VALVES] = {
+    {1, 200, 200, true, false, 6, 4},  // Valve 1: {pin, pulse, purge, solid, open}
+    {2, 200, 200, false, false, 7, 1},  // Valve 2
+    {3, 200, 200, false, false, 12, 1},  // Valve 3
+    {4, 200, 200, false, false, 1, 1},  // Valve 4
+    {5, 200, 200, false, false, 1, 2},  // Valve 5
+    {6, 200, 300, false, false, 1, 1},  // Valve 6
+    {7, 200, 200, false, false, 1, 3},  // Valve 7
+    {8, 600, 200, false, false, 1, 2},  // Valve 8
+    {9, 200, 200, false, false, 1, 3}   // Valve 9
+};
+
+ //how many valves do you want to use
+
+int activeValvesA[] = {1,3,8}; //input the specific valves you want to use
+int activeValvesB[] = {2,4,5};
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
+unsigned int valveCountA = ARRAY_SIZE(activeValvesA);
+unsigned int valveCountB = ARRAY_SIZE(activeValvesB);
+
+//End configuring
+
+bool isSolid = false;
+bool correctInput = false;
+bool programPaused = false;
+
+typedef struct Valve {
+  int valvePin;
+  int pulseTime;
+  int purgeTime;
+  bool valveState;
+  bool solid;
+} Valve;
+
+#define all_valves 12
+#define alt_valves 2
+Valve valves[all_valves];  
+Valve altValve[alt_valves];
+
+unsigned long previousMillis = 0;  
+unsigned long valveOpenTime = 0;   
+bool purging = false;
+bool valveState = false;
+
+void openValve(int valveIndex);
+void closeValve(int valveIndex);
+bool Check();
+bool pause();
+
+void setup() {
+  Serial.begin(9600);
+
+  for (int i = 0; i < NUM_VALVES; i++) {
+    pinMode(valveConfig[i][0], OUTPUT);  
+    digitalWrite(valveConfig[i][0], LOW);  
+
+    
+    
+  }
+  Serial.print("You input ");
+  Serial.print(cyclesA);
+  Serial.println(" cycles A");
+  Serial.print("-");
+  Serial.print(cyclesB);
+  Serial.println(" cycles B");
+
+  while (!correctInput){
+    correctInput = Check();
+  }
+  
+}
+
+
+void loop() {
+  Serial.println("starting");
+  for (unsigned int j = 0; j < cyclesA; j++) {
+    for (unsigned int i = 0; i < valveCountA; i++) {
+      int repeatValveA = activeValvesA[i] - 1;  
+      int repeats = valveConfig[repeatValveA][7];
+      for (unsigned int k = 0; k < repeats; k++){
+      
+      pause();
+
+      if (programPaused) {
+        delay(100); 
+        continue;
+      }
+      int valveIndex = activeValvesA[i] - 1;  
+      openValve(valveIndex); 
+      delay(valveConfig[valveIndex][1]);  // Pulse time
+      closeValve(valveIndex);  
+      delay(valveConfig[valveIndex][2]);  // Purge time
+      }
+      
+    }
+    
+  }
+  
+  
+  for (unsigned int j = 0; j < cyclesB; j++) {
+    for (unsigned int i = 0; i < valveCountA; i++) {
+      int repeatValvesB = activeValvesB[i] - 1;  // For B loop
+      int repeats = valveConfig[repeatValvesB][7];
+      for (unsigned int k = 0; k < repeats; k++){
+      
+        pause();
+
+      if (programPaused) {
+        delay(100); 
+        continue;
+      }
+      int valveIndex = activeValvesB[i] - 1;  
+      openValve(valveIndex); 
+      delay(valveConfig[valveIndex][1]);  // Pulse time
+      closeValve(valveIndex);  
+      delay(valveConfig[valveIndex][2]);  // Purge time
+      }
+      
+    }
+    
+  }
+  
+}
+
+void openValve(int valveIndex) {
+  int pin = valveConfig[valveIndex][0];  
+  digitalWrite(pin, HIGH);  
+
+  if (valveConfig[valveIndex][3] == true) {  
+    int altPin = valveConfig[valveIndex][5];  
+    digitalWrite(altPin, HIGH);  
+  }
+
+  valveConfig[valveIndex][4] = true;  
+
+  Serial.print("Valve ");
+  Serial.print(valveConfig[valveIndex][0]);
+  Serial.println(" opened.");
+
+  if (valveConfig[valveIndex][3] == true) {
+    Serial.print("Alternate Valve ");
+    Serial.print(valveConfig[valveIndex][5]);
+    Serial.println(" opened.");
+  }
+}
+
+void closeValve(int valveIndex) {
+  int pin = valveConfig[valveIndex][0];  
+  digitalWrite(pin, LOW);  
+
+  if (valveConfig[valveIndex][3] == true) {  
+    int altPin = valveConfig[valveIndex][5];  
+    digitalWrite(altPin, LOW);  
+  }
+
+  valveConfig[valveIndex][4] = false; 
+
+  Serial.print("Valve ");
+  Serial.print(valveConfig[valveIndex][0]);
+  Serial.println(" closed.");
+
+  if (valveConfig[valveIndex][3] == true) {
+    Serial.print("Alternate Valve ");
+    Serial.print(valveConfig[valveIndex][5]);
+    Serial.println(" closed.");
+  }
+}
+
+bool pause(){
+  if (Serial.available() > 0) {
+        char receivedChar = Serial.read();  // Read the incoming character
+        if (receivedChar == '-') {
+          Serial.println("Program paused. Press '+' to resume.");
+          closeAllValves();
+          programPaused = true;  // pause
+        } else if (receivedChar == '+') {
+          if (programPaused) {
+            Serial.println("Resuming program...");
+            programPaused = false;  // start
+          }
+        }
+      }
+}
+
+bool Check() {
+  Serial.println("Continue? (1 for Yes, 2 for No)");
+  while (Serial.available() == 0) {}
+
+  int input = Serial.parseInt();
+
+  if (input == 1) {
+    Serial.println("you input true");
+    return true;
+  } else if (input == 2) {
+    Serial.println("You input false");
+    return false;
+  } else {
+    Serial.println("Invalid input. Please enter 1 for Yes or 2 for No.");
+    while (Serial.available()) Serial.read(); // flush buffer
+    return false;
+  }
+}
+
+void closeAllValves() {
+  for (int i = 0; i < valveCountA; i++) {
+    int valveIndex = activeValvesA[i] - 1;
+    closeValve(valveIndex);
+  }
+  for (int i = 0; i < valveCountB; i++) {
+    int valveIndex = activeValvesB[i] - 1;
+    closeValve(valveIndex);
+  }
+
+}
