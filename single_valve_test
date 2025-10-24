@@ -1,0 +1,57 @@
+#include <Arduino.h>
+
+#define NUM_VALVES 9
+
+// Format: {pin, pulse time (ms)}
+int valveConfig[NUM_VALVES][2] = {
+  {1, 200},
+  {2, 200},
+  {3, 200},
+  {4, 200},
+  {5, 200},
+  {6, 200},
+  {7, 200},
+  {8, 200},
+  {9, 200}
+};
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("Valve Test Mode");
+  Serial.println("Type a valve number (1–9) to pulse that valve.");
+
+  // Set all pins as outputs and make sure they start LOW
+  for (int i = 0; i < NUM_VALVES; i++) {
+    pinMode(valveConfig[i][0], OUTPUT);
+    digitalWrite(valveConfig[i][0], LOW);
+  }
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    int valveNum = Serial.parseInt();  // read input number
+
+    if (valveNum >= 1 && valveNum <= NUM_VALVES) {
+      int valveIndex = valveNum - 1;
+      int pin = valveConfig[valveIndex][0];
+      int pulseTime = valveConfig[valveIndex][1];
+
+      Serial.print("Pulsing valve ");
+      Serial.print(valveNum);
+      Serial.print(" (pin ");
+      Serial.print(pin);
+      Serial.println(")");
+
+      digitalWrite(pin, HIGH);
+      delay(pulseTime);
+      digitalWrite(pin, LOW);
+
+      Serial.println("Pulse complete.\n");
+    } 
+    else {
+      Serial.println("Invalid valve number. Enter 1–9.\n");
+    }
+
+    while (Serial.available()) Serial.read(); // clear buffer
+  }
+}
