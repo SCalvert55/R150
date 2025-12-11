@@ -1,0 +1,27 @@
+#include <Arduino.h>
+#include <maxx6675.h>
+
+const int maxx_cs = 10; // Chip select pin
+const int maxx_clk = 13; // Clock pin
+const int maxx_Do = 12; // Data out pin
+
+Maxx6675 thermocouple(maxx_clk, maxx_cs, maxx_Do);
+
+void setup(){
+    Serial.begin(9600);
+    Serial.println("Thermocouple test starting");
+
+}
+
+void loop(){
+    //check if its a valid temp 
+    temp = thermocouple.readCelsius();
+    if (isnan(temp)) {
+      Serial.println("Invalid temperature reading");
+    } else {
+      Serial.print("Temperature: ");
+      Serial.print(temp);
+      Serial.println(" C");
+    }    
+}
+
