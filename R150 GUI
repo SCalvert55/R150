@@ -1,15 +1,899 @@
 import tkinter as tk
+from tkinter import ttk, messagebox
+import json
+import os
+import serial
+import serial.tools.list_ports
+import threading
+import time
 
-class App:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("R150 GUI")
+RECIPES_FILE = "ald_recipes.json"
 
-        self.label = tk.Label(root, text="test r150")
-        self.label.pack(pady=10)
+# -------------------------------------------------
+# Arduino Communication Manager
+# -------------------------------------------------
+class ArduinoManager:
+    def __init__(self):
+        self.serial_conn = None
+        self.connected = False
+        self.reading_thread = None
+        self.running = False
+        self.temp_data = {"Reactor": "--"}
+        self.pid_output = 0
+        self.pid_error = 0
+        self.callbacks = []
+        self.pid_callbacks = []
+        
+    def connect(self, port, baudrate=9600):
+        try:
+            self.serial_conn = serial.Serial(port, baudrate, timeout=1)
+            time.sleep(2)  # Wait for Arduino to reset
+            self.connected = True
+            self.running = True
+            self.reading_thread = threading.Thread(target=self._read_loop, daemon=True)
+            self.reading_thread.start()
+            return True
+        except Exception as e:
+            print(f"Connection error: {e}")
+            return False
+    
+    def disconnect(self):
+        self.running = False
+        self.connected = False
+        if self.serial_conn:
+            self.serial_conn.close()
+            self.serial_conn = None
+    
+    def send_command(self, command):
+        if self.connected and self.serial_conn:
+            try:
+                self.serial_conn.write(f"{command}\n".encode())
+                return True
+            except Exception as e:
+                print(f"Send error: {e}")
+                return False
+        return False
+    
+    def emergency_stop(self):
+        """Send emergency stop signal to Arduino"""
+        self.send_command("EMERGENCY_STOP")
+    
+    def reset_emergency(self):
+        """Reset emergency stop state"""
+        self.send_command("RESET_EMERGENCY")
+    
+    def set_temperature_setpoint(self, temp):
+        """Set temperature setpoint"""
+        self.send_command(f"TEMP_SETPOINT:{temp}")
+    
+    def enable_pid(self):
+        """Enable PID temperature control"""
+        self.send_command("PID_ON")
+    
+    def disable_pid(self):
+        """Disable PID temperature control"""
+        self.send_command("PID_OFF")
+    
+    def tune_pid(self, kp, ki, kd):
+        """Set PID tuning parameters"""
+        self.send_command(f"PID_TUNE:{kp}:{ki}:{kd}")
+    
+    def _read_loop(self):
+        while self.running:
+            if self.serial_conn and self.serial_conn.in_waiting:
+                try:
+                    line = self.serial_conn.readline().decode().strip()
+                    self._parse_data(line)
+                except Exception as e:
+                    print(f"Read error: {e}")
+            time.sleep(0.1)
+    
+    def _parse_data(self, line):
+        """Parse incoming data from Arduino"""
+        try:
+            # Temperature data: TEMP:Reactor:123.4
+            if line.startswith("TEMP:"):
+                parts = line.split(":")
+                if len(parts) == 3:
+                    sensor = parts[1]
+                    temp = parts[2]
+                    self.temp_data[sensor] = temp
+                    for callback in self.callbacks:
+                        callback(self.temp_data)
+            
+            # PID output data: PID:Output:123:Error:5.2
+            elif line.startswith("PID:"):
+                parts = line.split(":")
+                if len(parts) == 5:
+                    self.pid_output = float(parts[2])
+                    self.pid_error = float(parts[4])
+                    for callback in self.pid_callbacks:
+                        callback(self.pid_output, self.pid_error)
+            
+            # Acknowledgments and errors
+            elif line.startswith("ACK:") or line.startswith("ERROR:") or line.startswith("WARNING:"):
+                for callback in self.callbacks:
+                    if hasattr(callback, '__self__') and hasattr(callback.__self__, 'log_message'):
+                        callback.__self__.log_message(line)
+            
+        except Exception as e:
+            print(f"Parse error: {e}")
+    
+    def register_callback(self, callback):
+        self.callbacks.append(callback)
+    
+    def register_pid_callback(self, callback):
+        self.pid_callbacks.append(callback)
 
-        self.button = tk.Button(root, text="Click Me", command=self.on_button_click)
-        self.button.pack(pady=10)
+# -------------------------------------------------
+# Thermocouple Display with PID Control
+# -------------------------------------------------
+class ThermocoupleFrame(tk.LabelFrame):
+    def __init__(self, parent, arduino_mgr, app):
+        super().__init__(parent, text="Temperature Control", padx=15, pady=15, 
+                        font=("Arial", 11, "bold"), bg="#f0f0f0")
+        
+        self.arduino_mgr = arduino_mgr
+        self.app = app
+        self.pid_enabled = False
+        
+        # Temperature display
+        temp_frame = tk.Frame(self, bg="#f0f0f0")
+        temp_frame.pack(fill="x", pady=5)
+        
+        tk.Label(temp_frame, text="Current Temp:", font=("Arial", 12), 
+                bg="#f0f0f0", width=15, anchor="w").pack(side="left")
+        
+        self.temp_label = tk.Label(temp_frame, text="-- °C", font=("Arial", 14, "bold"), 
+                      bg="white", width=12, relief="sunken", anchor="e", padx=5)
+        self.temp_label.pack(side="left", padx=5)
+        
+        # Setpoint control
+        setpoint_frame = tk.Frame(self, bg="#f0f0f0")
+        setpoint_frame.pack(fill="x", pady=5)
+        
+        tk.Label(setpoint_frame, text="Setpoint:", font=("Arial", 12), 
+                bg="#f0f0f0", width=15, anchor="w").pack(side="left")
+        
+        self.setpoint_entry = tk.Entry(setpoint_frame, font=("Arial", 12), width=8)
+        self.setpoint_entry.pack(side="left", padx=5)
+        self.setpoint_entry.insert(0, "0")
+        
+        tk.Label(setpoint_frame, text="°C", font=("Arial", 12), 
+                bg="#f0f0f0").pack(side="left")
+        
+        tk.Button(setpoint_frame, text="Set", command=self.set_temperature,
+                 font=("Arial", 10), bg="#FF9800", fg="white", width=6,
+                 activebackground="#e68900").pack(side="left", padx=5)
+        
+        # PID control
+        pid_frame = tk.Frame(self, bg="#f0f0f0")
+        pid_frame.pack(fill="x", pady=5)
+        
+        self.pid_button = tk.Button(pid_frame, text="Enable PID", 
+                                    command=self.toggle_pid,
+                                    font=("Arial", 11, "bold"), bg="#4CAF50", 
+                                    fg="white", width=12,
+                                    activebackground="#45a049")
+        self.pid_button.pack(side="left", padx=5)
+        
+        tk.Button(pid_frame, text="PID Tuning", command=self.open_pid_tuning,
+                 font=("Arial", 10), bg="#2196F3", fg="white", width=12,
+                 activebackground="#0b7dda").pack(side="left", padx=5)
+        
+        # PID status display
+        status_frame = tk.Frame(self, bg="#f0f0f0")
+        status_frame.pack(fill="x", pady=5)
+        
+        tk.Label(status_frame, text="PID Output:", font=("Arial", 10), 
+                bg="#f0f0f0", width=15, anchor="w").pack(side="left")
+        
+        self.pid_output_label = tk.Label(status_frame, text="0", font=("Arial", 10), 
+                                         bg="white", width=8, relief="sunken", anchor="e")
+        self.pid_output_label.pack(side="left", padx=5)
+        
+        tk.Label(status_frame, text="Error:", font=("Arial", 10), 
+                bg="#f0f0f0").pack(side="left", padx=(10,0))
+        
+        self.error_label = tk.Label(status_frame, text="0.0 °C", font=("Arial", 10), 
+                                    bg="white", width=10, relief="sunken", anchor="e")
+        self.error_label.pack(side="left", padx=5)
+        
+        # Register callbacks
+        self.arduino_mgr.register_callback(self.update_temps)
+        self.arduino_mgr.register_pid_callback(self.update_pid_status)
+    
+    def update_temps(self, temp_data):
+        """Update temperature display from Arduino data"""
+        if "Reactor" in temp_data:
+            self.temp_label.config(text=f"{temp_data['Reactor']} °C")
+    
+    def update_pid_status(self, output, error):
+        """Update PID status display"""
+        self.pid_output_label.config(text=f"{int(output)}")
+        self.error_label.config(text=f"{error:.1f} °C")
+    
+    def set_temperature(self):
+        try:
+            temp = float(self.setpoint_entry.get())
+            if temp < 0 or temp > 500:
+                messagebox.showerror("Error", "Temperature must be between 0-500°C")
+                return
+            self.arduino_mgr.set_temperature_setpoint(temp)
+            self.app.log_message(f"Temperature setpoint set to {temp}°C")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid temperature value")
+    
+    def toggle_pid(self):
+        if self.pid_enabled:
+            self.arduino_mgr.disable_pid()
+            self.pid_enabled = False
+            self.pid_button.config(text="Enable PID", bg="#4CAF50")
+            self.app.log_message("PID control disabled")
+        else:
+            # Check setpoint is set
+            try:
+                temp = float(self.setpoint_entry.get())
+                if temp <= 0:
+                    messagebox.showerror("Error", "Set a valid setpoint before enabling PID")
+                    return
+            except ValueError:
+                messagebox.showerror("Error", "Set a valid setpoint before enabling PID")
+                return
+            
+            self.arduino_mgr.enable_pid()
+            self.pid_enabled = True
+            self.pid_button.config(text="Disable PID", bg="#f44336")
+            self.app.log_message("PID control enabled")
+    
+    def open_pid_tuning(self):
+        PIDTuningWindow(self, self.arduino_mgr, self.app)
 
-    def on_button_click(self):
-        self.label.config(text="Button Clicked!")
+# -------------------------------------------------
+# PID Tuning Window
+# -------------------------------------------------
+class PIDTuningWindow(tk.Toplevel):
+    def __init__(self, parent, arduino_mgr, app):
+        super().__init__(parent)
+        self.title("PID Tuning")
+        self.geometry("400x300")
+        self.configure(bg="#f0f0f0")
+        self.arduino_mgr = arduino_mgr
+        self.app = app
+        
+        tk.Label(self, text="PID Tuning Parameters", font=("Arial", 14, "bold"),
+                bg="#f0f0f0").pack(pady=15)
+        
+        tk.Label(self, text="Adjust PID gains for temperature control",
+                font=("Arial", 10), bg="#f0f0f0", fg="#666").pack(pady=5)
+        
+        # PID parameters
+        params_frame = tk.Frame(self, bg="#f0f0f0")
+        params_frame.pack(pady=20, padx=30)
+        
+        self.entries = {}
+        
+        params = [
+            ("Proportional (Kp):", "kp", "2.0"),
+            ("Integral (Ki):", "ki", "0.5"),
+            ("Derivative (Kd):", "kd", "1.0")
+        ]
+        
+        for label, key, default in params:
+            frame = tk.Frame(params_frame, bg="#f0f0f0")
+            frame.pack(fill="x", pady=8)
+            
+            tk.Label(frame, text=label, font=("Arial", 11),
+                    bg="#f0f0f0", width=18, anchor="w").pack(side="left")
+            
+            entry = tk.Entry(frame, font=("Arial", 11), width=10)
+            entry.insert(0, default)
+            entry.pack(side="left", padx=5)
+            self.entries[key] = entry
+        
+        # Buttons
+        btn_frame = tk.Frame(self, bg="#f0f0f0")
+        btn_frame.pack(pady=15)
+        
+        tk.Button(btn_frame, text="Apply", command=self.apply_tuning,
+                 font=("Arial", 11, "bold"), bg="#4CAF50", fg="white",
+                 width=10, height=2).pack(side="left", padx=10)
+        
+        tk.Button(btn_frame, text="Reset Defaults", command=self.reset_defaults,
+                 font=("Arial", 11), bg="#FF9800", fg="white",
+                 width=10, height=2).pack(side="left", padx=10)
+    
+    def apply_tuning(self):
+        try:
+            kp = float(self.entries["kp"].get())
+            ki = float(self.entries["ki"].get())
+            kd = float(self.entries["kd"].get())
+            
+            self.arduino_mgr.tune_pid(kp, ki, kd)
+            self.app.log_message(f"PID tuned: Kp={kp}, Ki={ki}, Kd={kd}")
+            messagebox.showinfo("Success", "PID parameters updated")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid PID values")
+    
+    def reset_defaults(self):
+        self.entries["kp"].delete(0, tk.END)
+        self.entries["kp"].insert(0, "2.0")
+        self.entries["ki"].delete(0, tk.END)
+        self.entries["ki"].insert(0, "0.5")
+        self.entries["kd"].delete(0, tk.END)
+        self.entries["kd"].insert(0, "1.0")
+
+# -------------------------------------------------
+# Arduino Connection Window
+# -------------------------------------------------
+class ArduinoWindow(tk.Toplevel):
+    def __init__(self, parent, arduino_mgr):
+        super().__init__(parent)
+        self.title("Arduino Connection")
+        self.geometry("450x250")
+        self.configure(bg="#f0f0f0")
+        
+        self.arduino_mgr = arduino_mgr
+        
+        # Port selection
+        port_frame = tk.Frame(self, bg="#f0f0f0")
+        port_frame.pack(pady=20, padx=20, fill="x")
+        
+        tk.Label(port_frame, text="COM Port:", font=("Arial", 11), 
+                bg="#f0f0f0").pack(side="left", padx=5)
+        
+        self.port_var = tk.StringVar()
+        self.port_entry = ttk.Combobox(port_frame, textvariable=self.port_var, 
+                                       width=15, font=("Arial", 10))
+        self.port_entry.pack(side="left", padx=5)
+        
+        tk.Button(port_frame, text="Refresh Ports", command=self.refresh_ports,
+                 font=("Arial", 10), bg="#4CAF50", fg="white", 
+                 activebackground="#45a049").pack(side="left", padx=5)
+        
+        # Connection status
+        status_frame = tk.Frame(self, bg="#f0f0f0")
+        status_frame.pack(pady=10)
+        
+        tk.Label(status_frame, text="Status:", font=("Arial", 11), 
+                bg="#f0f0f0").pack(side="left", padx=5)
+        
+        self.status_label = tk.Label(status_frame, text="Disconnected", 
+                                     font=("Arial", 11, "bold"), fg="red", 
+                                     bg="white", width=15, relief="sunken")
+        self.status_label.pack(side="left", padx=5)
+        
+        # Control buttons
+        btn_frame = tk.Frame(self, bg="#f0f0f0")
+        btn_frame.pack(pady=20)
+        
+        self.connect_btn = tk.Button(btn_frame, text="Connect", 
+                                     command=self.toggle_connection,
+                                     font=("Arial", 11, "bold"), bg="#2196F3", 
+                                     fg="white", width=12, height=2,
+                                     activebackground="#0b7dda")
+        self.connect_btn.pack(side="left", padx=10)
+        
+        tk.Button(btn_frame, text="Test Connection", command=self.test_connection,
+                 font=("Arial", 11), bg="#FF9800", fg="white", width=12, height=2,
+                 activebackground="#e68900").pack(side="left", padx=10)
+        
+        self.refresh_ports()
+        
+    def refresh_ports(self):
+        ports = [port.device for port in serial.tools.list_ports.comports()]
+        self.port_entry['values'] = ports
+        if ports:
+            self.port_entry.current(0)
+    
+    def toggle_connection(self):
+        if self.arduino_mgr.connected:
+            self.arduino_mgr.disconnect()
+            self.status_label.config(text="Disconnected", fg="red")
+            self.connect_btn.config(text="Connect")
+        else:
+            port = self.port_var.get()
+            if not port:
+                messagebox.showerror("Error", "Please select a COM port")
+                return
+            
+            if self.arduino_mgr.connect(port):
+                self.status_label.config(text="Connected", fg="green")
+                self.connect_btn.config(text="Disconnect")
+            else:
+                messagebox.showerror("Error", "Failed to connect to Arduino")
+    
+    def test_connection(self):
+        if self.arduino_mgr.connected:
+            self.arduino_mgr.send_command("TEST")
+            messagebox.showinfo("Test", "Test command sent to Arduino")
+        else:
+            messagebox.showwarning("Warning", "Not connected to Arduino")
+
+# -------------------------------------------------
+# Recipe Step Editor
+# -------------------------------------------------
+class RecipeStepFrame(tk.Frame):
+    def __init__(self, parent, step_num, delete_callback):
+        super().__init__(parent, bg="#ffffff", relief="ridge", bd=2)
+        self.step_num = step_num
+        self.delete_callback = delete_callback
+        
+        # Header
+        header = tk.Frame(self, bg="#37474F")
+        header.pack(fill="x")
+        
+        tk.Label(header, text=f"Step {step_num}", font=("Arial", 10, "bold"),
+                bg="#37474F", fg="white", padx=10, pady=5).pack(side="left")
+        
+        tk.Button(header, text="✕", command=lambda: delete_callback(self),
+                 font=("Arial", 10, "bold"), bg="#f44336", fg="white",
+                 bd=0, padx=8, pady=2).pack(side="right", padx=5, pady=3)
+        
+        # Step parameters
+        params_frame = tk.Frame(self, bg="#ffffff", padx=10, pady=10)
+        params_frame.pack(fill="both", expand=True)
+        
+        self.entries = {}
+        
+        # Row 1: Precursors
+        row1 = tk.Frame(params_frame, bg="#ffffff")
+        row1.pack(fill="x", pady=3)
+        
+        tk.Label(row1, text="Precursor A:", font=("Arial", 9),
+                bg="#ffffff", width=12, anchor="w").pack(side="left")
+        self.entries["precursor_a"] = tk.Entry(row1, font=("Arial", 9), width=12)
+        self.entries["precursor_a"].pack(side="left", padx=3)
+        
+        tk.Label(row1, text="Precursor B:", font=("Arial", 9),
+                bg="#ffffff", width=12, anchor="w").pack(side="left", padx=(10,0))
+        self.entries["precursor_b"] = tk.Entry(row1, font=("Arial", 9), width=12)
+        self.entries["precursor_b"].pack(side="left", padx=3)
+        
+        # Row 2: Pulse times
+        row2 = tk.Frame(params_frame, bg="#ffffff")
+        row2.pack(fill="x", pady=3)
+        
+        tk.Label(row2, text="Pulse A (s):", font=("Arial", 9),
+                bg="#ffffff", width=12, anchor="w").pack(side="left")
+        self.entries["pulse_a"] = tk.Entry(row2, font=("Arial", 9), width=12)
+        self.entries["pulse_a"].pack(side="left", padx=3)
+        
+        tk.Label(row2, text="Pulse B (s):", font=("Arial", 9),
+                bg="#ffffff", width=12, anchor="w").pack(side="left", padx=(10,0))
+        self.entries["pulse_b"] = tk.Entry(row2, font=("Arial", 9), width=12)
+        self.entries["pulse_b"].pack(side="left", padx=3)
+        
+        # Row 3: Purge times
+        row3 = tk.Frame(params_frame, bg="#ffffff")
+        row3.pack(fill="x", pady=3)
+        
+        tk.Label(row3, text="Purge A (s):", font=("Arial", 9),
+                bg="#ffffff", width=12, anchor="w").pack(side="left")
+        self.entries["purge_a"] = tk.Entry(row3, font=("Arial", 9), width=12)
+        self.entries["purge_a"].pack(side="left", padx=3)
+        
+        tk.Label(row3, text="Purge B (s):", font=("Arial", 9),
+                bg="#ffffff", width=12, anchor="w").pack(side="left", padx=(10,0))
+        self.entries["purge_b"] = tk.Entry(row3, font=("Arial", 9), width=12)
+        self.entries["purge_b"].pack(side="left", padx=3)
+        
+        # Row 4: Cycles and order
+        row4 = tk.Frame(params_frame, bg="#ffffff")
+        row4.pack(fill="x", pady=3)
+        
+        tk.Label(row4, text="Cycles:", font=("Arial", 9),
+                bg="#ffffff", width=12, anchor="w").pack(side="left")
+        self.entries["cycles"] = tk.Entry(row4, font=("Arial", 9), width=12)
+        self.entries["cycles"].pack(side="left", padx=3)
+        
+        tk.Label(row4, text="Order:", font=("Arial", 9),
+                bg="#ffffff", width=12, anchor="w").pack(side="left", padx=(10,0))
+        self.order_var = tk.StringVar(value="A-B")
+        ttk.Combobox(row4, textvariable=self.order_var,
+                    values=["A-B", "B-A", "A-B-A", "B-A-B"],
+                    font=("Arial", 9), width=10, state="readonly").pack(side="left", padx=3)
+    
+    def get_data(self):
+        return {
+            "precursor_a": self.entries["precursor_a"].get(),
+            "precursor_b": self.entries["precursor_b"].get(),
+            "pulse_a": self.entries["pulse_a"].get(),
+            "pulse_b": self.entries["pulse_b"].get(),
+            "purge_a": self.entries["purge_a"].get(),
+            "purge_b": self.entries["purge_b"].get(),
+            "cycles": self.entries["cycles"].get(),
+            "order": self.order_var.get()
+        }
+    
+    def set_data(self, data):
+        for key in ["precursor_a", "precursor_b", "pulse_a", "pulse_b", "purge_a", "purge_b", "cycles"]:
+            if key in data:
+                self.entries[key].delete(0, tk.END)
+                self.entries[key].insert(0, data[key])
+        if "order" in data:
+            self.order_var.set(data["order"])
+
+# -------------------------------------------------
+# Recipe Window
+# -------------------------------------------------
+class RecipeWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("ALD Recipe Manager")
+        self.geometry("750x800")
+        self.configure(bg="#f0f0f0")
+        
+        self.recipes = self.load_recipes()
+        self.step_frames = []
+        
+        # Top controls
+        top_frame = tk.Frame(self, bg="#f0f0f0")
+        top_frame.pack(pady=15, padx=20, fill="x")
+        
+        # Recipe selection
+        select_frame = tk.Frame(top_frame, bg="#f0f0f0")
+        select_frame.pack(side="left", fill="x", expand=True)
+        
+        tk.Label(select_frame, text="Recipe:", font=("Arial", 11, "bold"),
+                bg="#f0f0f0").pack(side="left", padx=5)
+        
+        self.selected = tk.StringVar(value="New Recipe")
+        self.recipe_menu = ttk.Combobox(select_frame, textvariable=self.selected,
+                                   values=["New Recipe"] + list(self.recipes.keys()),
+                                   font=("Arial", 10), width=25)
+        self.recipe_menu.pack(side="left", padx=5)
+        self.recipe_menu.bind("<<ComboboxSelected>>", lambda e: self.load_recipe(self.selected.get()))
+        
+        # Recipe name
+        name_frame = tk.Frame(self, bg="#f0f0f0")
+        name_frame.pack(pady=5, padx=20, fill="x")
+        
+        tk.Label(name_frame, text="Recipe Name:", font=("Arial", 10),
+                bg="#f0f0f0").pack(side="left", padx=5)
+        
+        self.name_entry = tk.Entry(name_frame, font=("Arial", 10), width=30)
+        self.name_entry.pack(side="left", padx=5)
+        
+        # Global parameters
+        global_frame = tk.LabelFrame(self, text="Global Parameters",
+                                     font=("Arial", 10, "bold"), bg="#f0f0f0",
+                                     padx=15, pady=10)
+        global_frame.pack(pady=5, padx=20, fill="x")
+        
+        global_row = tk.Frame(global_frame, bg="#f0f0f0")
+        global_row.pack(fill="x")
+        
+        tk.Label(global_row, text="Temperature (°C):", font=("Arial", 9),
+                bg="#f0f0f0").pack(side="left", padx=5)
+        self.temp_entry = tk.Entry(global_row, font=("Arial", 9), width=10)
+        self.temp_entry.pack(side="left", padx=5)
+        
+        tk.Label(global_row, text="Pressure (Torr):", font=("Arial", 9),
+                bg="#f0f0f0").pack(side="left", padx=(15,5))
+        self.pressure_entry = tk.Entry(global_row, font=("Arial", 9), width=10)
+        self.pressure_entry.pack(side="left", padx=5)
+        
+        # Steps container with scrollbar
+        steps_label_frame = tk.LabelFrame(self, text="Recipe Steps (Sequential)",
+                                         font=("Arial", 10, "bold"), bg="#f0f0f0",
+                                         padx=5, pady=5)
+        steps_label_frame.pack(pady=5, padx=20, fill="both", expand=True)
+        
+        # Canvas and scrollbar for steps
+        canvas_frame = tk.Frame(steps_label_frame, bg="#f0f0f0")
+        canvas_frame.pack(fill="both", expand=True)
+        
+        self.canvas = tk.Canvas(canvas_frame, bg="#e8e8e8", highlightthickness=0)
+        scrollbar = tk.Scrollbar(canvas_frame, orient="vertical", command=self.canvas.yview)
+        self.steps_container = tk.Frame(self.canvas, bg="#e8e8e8")
+        
+        self.steps_container.bind("<Configure>", 
+                                 lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        
+        self.canvas.create_window((0, 0), window=self.steps_container, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Add step button
+        tk.Button(steps_label_frame, text="+ Add Step", command=self.add_step,
+                 font=("Arial", 10, "bold"), bg="#2196F3", fg="white",
+                 width=15).pack(pady=5)
+        
+        # Bottom buttons
+        btn_frame = tk.Frame(self, bg="#f0f0f0")
+        btn_frame.pack(pady=15)
+        
+        tk.Button(btn_frame, text="Save Recipe", command=self.save_recipe,
+                 font=("Arial", 11, "bold"), bg="#4CAF50", fg="white",
+                 width=12, height=2).pack(side="left", padx=10)
+        
+        tk.Button(btn_frame, text="Delete Recipe", command=self.delete_recipe,
+                 font=("Arial", 11, "bold"), bg="#f44336", fg="white",
+                 width=12, height=2).pack(side="left", padx=10)
+        
+        # Add initial step
+        self.add_step()
+    
+    def add_step(self):
+        step_num = len(self.step_frames) + 1
+        step_frame = RecipeStepFrame(self.steps_container, step_num, self.delete_step)
+        step_frame.pack(fill="x", padx=5, pady=5)
+        self.step_frames.append(step_frame)
+    
+    def delete_step(self, step_frame):
+        if len(self.step_frames) <= 1:
+            messagebox.showwarning("Warning", "Recipe must have at least one step")
+            return
+        
+        step_frame.destroy()
+        self.step_frames.remove(step_frame)
+        
+        # Renumber remaining steps
+        for i, frame in enumerate(self.step_frames):
+            frame.step_num = i + 1
+            for widget in frame.winfo_children():
+                if isinstance(widget, tk.Frame) and widget.cget("bg") == "#37474F":
+                    for label in widget.winfo_children():
+                        if isinstance(label, tk.Label):
+                            label.config(text=f"Step {i + 1}")
+                            break
+                    break
+    
+    def load_recipes(self):
+        if os.path.exists(RECIPES_FILE):
+            with open(RECIPES_FILE, "r") as f:
+                return json.load(f)
+        return {}
+    
+    def load_recipe(self, name):
+        if name == "New Recipe" or name not in self.recipes:
+            self.name_entry.delete(0, tk.END)
+            self.temp_entry.delete(0, tk.END)
+            self.pressure_entry.delete(0, tk.END)
+            
+            # Clear all steps and add one default
+            for frame in self.step_frames[:]:
+                frame.destroy()
+            self.step_frames.clear()
+            self.add_step()
+            return
+        
+        data = self.recipes[name]
+        
+        # Load global parameters
+        self.name_entry.delete(0, tk.END)
+        self.name_entry.insert(0, name)
+        
+        self.temp_entry.delete(0, tk.END)
+        if "temp_setpoint" in data:
+            self.temp_entry.insert(0, data["temp_setpoint"])
+        
+        self.pressure_entry.delete(0, tk.END)
+        if "pressure" in data:
+            self.pressure_entry.insert(0, data["pressure"])
+        
+        # Load steps
+        for frame in self.step_frames[:]:
+            frame.destroy()
+        self.step_frames.clear()
+        
+        if "steps" in data:
+            for step_data in data["steps"]:
+                self.add_step()
+                self.step_frames[-1].set_data(step_data)
+        else:
+            # Old format compatibility - single step
+            self.add_step()
+            self.step_frames[0].set_data(data)
+    
+    def save_recipe(self):
+        name = self.name_entry.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Please enter a recipe name")
+            return
+        
+        # Gather all step data
+        steps = []
+        for step_frame in self.step_frames:
+            steps.append(step_frame.get_data())
+        
+        self.recipes[name] = {
+            "temp_setpoint": self.temp_entry.get(),
+            "pressure": self.pressure_entry.get(),
+            "steps": steps
+        }
+        
+        with open(RECIPES_FILE, "w") as f:
+            json.dump(self.recipes, f, indent=4)
+        
+        # Update dropdown
+        self.recipe_menu['values'] = ["New Recipe"] + list(self.recipes.keys())
+        
+        messagebox.showinfo("Success", f"Recipe '{name}' saved successfully with {len(steps)} step(s)")
+        self.selected.set(name)
+    
+    def delete_recipe(self):
+        name = self.selected.get()
+        if name in self.recipes:
+            if messagebox.askyesno("Confirm", f"Delete recipe '{name}'?"):
+                del self.recipes[name]
+                with open(RECIPES_FILE, "w") as f:
+                    json.dump(self.recipes, f, indent=4)
+                self.recipe_menu['values'] = ["New Recipe"] + list(self.recipes.keys())
+                messagebox.showinfo("Success", f"Recipe '{name}' deleted")
+                self.selected.set("New Recipe")
+                self.load_recipe("New Recipe")
+
+# -------------------------------------------------
+# Valves Control Window
+# -------------------------------------------------
+class ValvesWindow(tk.Toplevel):
+    def __init__(self, parent, arduino_mgr):
+        super().__init__(parent)
+        self.title("Valve Control")
+        self.geometry("600x550")
+        self.configure(bg="#f0f0f0")
+        self.arduino_mgr = arduino_mgr
+        
+        tk.Label(self, text="Valve Control Panel", font=("Arial", 14, "bold"),
+                bg="#f0f0f0").pack(pady=15)
+        
+        tk.Label(self, text="Configure and control all precursor and utility valves",
+                font=("Arial", 10), bg="#f0f0f0", fg="#666").pack(pady=5)
+        
+        # Precursor valves
+        precursor_frame = tk.LabelFrame(self, text="Precursor Valves",
+                                       font=("Arial", 11, "bold"), bg="#f0f0f0",
+                                       padx=15, pady=10)
+        precursor_frame.pack(pady=10, padx=20, fill="both", expand=True)
+        
+        precursors = ["Precursor A", "Precursor B", "Precursor C", "Precursor D"]
+        
+        for precursor in precursors:
+            frame = tk.Frame(precursor_frame, bg="#f0f0f0")
+            frame.pack(pady=8, padx=10, fill="x")
+            
+            tk.Label(frame, text=precursor, font=("Arial", 11),
+                    bg="#f0f0f0", width=15, anchor="w").pack(side="left")
+            
+            tk.Button(frame, text="Open", command=lambda v=precursor: self.control_valve(v, "OPEN"),
+                     font=("Arial", 10), bg="#4CAF50", fg="white", width=8).pack(side="left", padx=5)
+            
+            tk.Button(frame, text="Close", command=lambda v=precursor: self.control_valve(v, "CLOSE"),
+                     font=("Arial", 10), bg="#f44336", fg="white", width=8).pack(side="left", padx=5)
+        
+        # Utility valves
+        utility_frame = tk.LabelFrame(self, text="Utility Valves",
+                                     font=("Arial", 11, "bold"), bg="#f0f0f0",
+                                     padx=15, pady=10)
+        utility_frame.pack(pady=10, padx=20, fill="x")
+        
+        utilities = ["Purge Gas", "Vacuum", "Vent"]
+        
+        for utility in utilities:
+            frame = tk.Frame(utility_frame, bg="#f0f0f0")
+            frame.pack(pady=8, padx=10, fill="x")
+            
+            tk.Label(frame, text=utility, font=("Arial", 11),
+                    bg="#f0f0f0", width=15, anchor="w").pack(side="left")
+            
+            tk.Button(frame, text="Open", command=lambda v=utility: self.control_valve(v, "OPEN"),
+                     font=("Arial", 10), bg="#4CAF50", fg="white", width=8).pack(side="left", padx=5)
+            
+            tk.Button(frame, text="Close", command=lambda v=utility: self.control_valve(v, "CLOSE"),
+                     font=("Arial", 10), bg="#f44336", fg="white", width=8).pack(side="left", padx=5)
+        
+        # Emergency close all
+        tk.Button(self, text="Close All Valves", command=self.close_all_valves,
+                 font=("Arial", 12, "bold"), bg="#f44336", fg="white",
+                 width=20, height=2).pack(pady=15)
+    
+    def control_valve(self, valve, action):
+        cmd = f"VALVE:{valve.replace(' ', '_')}:{action}"
+        self.arduino_mgr.send_command(cmd)
+    
+    def close_all_valves(self):
+        if messagebox.askyesno("Confirm", "Close all valves?"):
+            valves = ["Precursor_A", "Precursor_B", "Precursor_C", "Precursor_D", 
+                     "Purge_Gas", "Vacuum", "Vent"]
+            for valve in valves:
+                self.arduino_mgr.send_command(f"VALVE:{valve}:CLOSE")
+
+# -------------------------------------------------
+# Main Application
+# -------------------------------------------------
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("ALD R150 Control System")
+        self.geometry("900x750")
+        self.configure(bg="#e0e0e0")
+        
+        self.arduino_mgr = ArduinoManager()
+        self.process_running = False
+        
+        self.create_toolbar()
+        self.create_header()
+        self.create_emergency_stops()
+        self.create_main_content()
+        
+        # Register app for logging callbacks
+        self.arduino_mgr.register_callback(self)
+        
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+    
+    def create_toolbar(self):
+        toolbar = tk.Frame(self, bg="#263238", height=50)
+        toolbar.pack(fill="x", side="top")
+        
+        btn_style = {
+            "font": ("Arial", 11, "bold"),
+            "bg": "#37474F",
+            "fg": "white",
+            "activebackground": "#546E7A",
+            "activeforeground": "white",
+            "bd": 0,
+            "padx": 15,
+            "pady": 8,
+            "cursor": "hand2"
+        }
+        
+        tk.Button(toolbar, text="⚙ Valves", command=self.open_valves,
+                 **btn_style).pack(side="left", padx=5, pady=8)
+        
+        tk.Button(toolbar, text="📋 Recipes", command=self.open_recipes,
+                 **btn_style).pack(side="left", padx=5, pady=8)
+        
+        tk.Button(toolbar, text="🔌 Arduino", command=self.open_arduino,
+                 **btn_style).pack(side="left", padx=5, pady=8)
+        
+        # Connection indicator
+        self.conn_indicator = tk.Label(toolbar, text="● Disconnected", 
+                                       font=("Arial", 10), bg="#263238", 
+                                       fg="#f44336", padx=10)
+        self.conn_indicator.pack(side="left", padx=20)
+        
+        # Start/Stop buttons
+        self.start_btn = tk.Button(toolbar, text="▶ START", 
+                                   command=self.start_process,
+                                   font=("Arial", 11, "bold"), bg="#4CAF50",
+                                   fg="white", padx=20, pady=8, bd=0,
+                                   cursor="hand2", activebackground="#45a049")
+        self.start_btn.pack(side="right", padx=10, pady=8)
+        
+        tk.Button(toolbar, text="■ STOP", command=self.stop_process,
+                 font=("Arial", 11, "bold"), bg="#f44336", fg="white",
+                 padx=20, pady=8, bd=0, cursor="hand2",
+                 activebackground="#da190b").pack(side="right", padx=5, pady=8)
+        
+        # Update connection status periodically
+        self.update_connection_status()
+    
+    def create_header(self):
+        header = tk.Frame(self, bg="#e0e0e0")
+        header.pack(pady=15)
+        
+        tk.Label(header, text="ALD R150 Control System",
+                font=("Arial", 20, "bold"), bg="#e0e0e0",
+                fg="#263238").pack()
+        
+        tk.Label(header, text="Atomic Layer Deposition Controller with PID Temperature Control",
+                font=("Arial", 11), bg="#e0e0e0",
+                fg="#546E7A").pack()
+    
+    def create_emergency_stops(self):
+        estop_frame = tk.Frame(self, bg="#e0e0e0")
+        estop_frame.pack(pady=10)
+        
+        # Primary E-Stop
+        tk.Button(estop_frame, text="⚠ EMERGENCY STOP ⚠",
+                 command=self.emergency_stop,
+                 font=("Arial", 16, "bold"), bg="#d32f2f", fg="white",
+                 width=25, height=2, relief="raised", bd=3,
+                 cursor="hand2", activebackground="#b71c1c").pack(pady=5)
+        
+        # Reset button
+        tk.Button(estop_frame, text="Reset Emergency Stop",)

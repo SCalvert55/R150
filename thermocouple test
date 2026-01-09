@@ -1,27 +1,301 @@
 #include <Arduino.h>
 #include <max6675.h>
 
-const int maxx_cs = 10; // Chip select pin
-const int maxx_clk = 13; // Clock pin
-const int maxx_Do = 12; // Data out pin
+const int maxx_cs = 10;
+const int maxx_clk = 13;
+const int maxx_do = 12;
+MAX6675 thermocouple(maxx_clk, maxx_cs, maxx_do);
 
-MAX6675 thermocouple(maxx_clk, maxx_cs, maxx_Do);
+const int heaterPin = 9;
 
-void setup(){
+const int valveA = 2;
+const int valveB = 3;
+const int valvePurge = 4;
+const int valveVacuum = 5;
+const int valveVent = 6;
+
+double setpoint = 0.0;
+double currentTemp = 0.0;
+double pidOutput = 0.0;
+
+double Kp = 2.0;
+double Ki = 0.5;
+double Kd = 1.0;
+
+double integral = 0.0;
+double previousError = 0.0;
+unsigned long lastTime = 0;
+
+bool pidEnabled = false;
+bool emergencyStop = false;
+bool processRunning = false;
+
+unsigned long lastTempRead = 0;
+const int tempReadInterval = 500;
+
+void setup() {
     Serial.begin(9600);
-    Serial.println("Thermocouple test starting");
-
+    
+    pinMode(heaterPin, OUTPUT);
+    analogWrite(heaterPin, 0);
+    
+    pinMode(valveA, OUTPUT);
+    pinMode(valveB, OUTPUT);
+    pinMode(valvePurge, OUTPUT);
+    pinMode(valveVacuum, OUTPUT);
+    pinMode(valveVent, OUTPUT);
+    
+    digitalWrite(valveA, LOW);
+    digitalWrite(valveB, LOW);
+    digitalWrite(valvePurge, LOW);
+    digitalWrite(valveVacuum, LOW);
+    digitalWrite(valveVent, LOW);
+    
+    Serial.println("ALD Controller Ready");
 }
 
-void loop(){
-    //check if its a valid temp 
-    double temp = thermocouple.readCelsius();
-    if (isnan(temp)) {
-      Serial.println("Invalid temperature reading");
+void loop() {
+    if (emergencyStop) {
+        handleEmergencyStop();
+        return;
+    }
+    
+    if (millis() - lastTempRead >= tempReadInterval) {
+        lastTempRead = millis();
+        readAndControlTemperature();
+    }
+    
+    if (Serial.available()) {
+        String command = Serial.readStringUntil('\n');
+        command.trim();
+        handleCommand(command);
+    }
+}
+
+void readAndControlTemperature() {
+    currentTemp = thermocouple.readCelsius();
+    
+    if (isnan(currentTemp)) {
+        Serial.println("Invalid temperature reading");
+        if (pidEnabled) {
+            analogWrite(heaterPin, 0);
+            Serial.println("WARNING: Heater disabled because of invalid temp reading");
+        }
+        return;
+    }
+    
+    Serial.print("TEMP:Reactor:");
+    Serial.println(currentTemp, 1);
+    
+    if (pidEnabled && setpoint > 0) {
+        pidOutput = calculatePID(currentTemp, setpoint);
+        analogWrite(heaterPin, (int)pidOutput);
+        
+        Serial.print("PID:Output:");
+        Serial.print(pidOutput);
+        Serial.print(":Error:");
+        Serial.println(setpoint - currentTemp, 2);
     } else {
-      Serial.print("Temperature: ");
-      Serial.print(temp);
-      Serial.println(" C");
-    }    
+        analogWrite(heaterPin, 0);
+    }
 }
 
+double calculatePID(double currentValue, double targetValue) {
+    unsigned long currentTime = millis();
+    double deltaTime = (currentTime - lastTime) / 1000.0;
+    
+    if (deltaTime <= 0) {
+        return pidOutput;
+    }
+    
+    double error = targetValue - currentValue;
+    
+    double P = Kp * error;
+    
+    integral += error * deltaTime;
+    if (integral > 255) integral = 255;
+    if (integral < -255) integral = -255;
+    double I = Ki * integral;
+    
+    double derivative = (error - previousError) / deltaTime;
+    double D = Kd * derivative;
+    
+    double output = P + I + D;
+    
+    if (output > 255) output = 255;
+    if (output < 0) output = 0;
+    
+    previousError = error;
+    lastTime = currentTime;
+    
+    return output;
+}
+
+void handleCommand(String cmd) {
+    Serial.print("CMD_RECEIVED:");
+    Serial.println(cmd);
+    
+    if (cmd == "EMERGENCY_STOP") {
+        emergencyStop = true;
+        handleEmergencyStop();
+        Serial.println("ACK:EMERGENCY_STOP_ACTIVATED");
+    }
+    
+    else if (cmd.startsWith("TEMP_SETPOINT:")) {
+        double newSetpoint = cmd.substring(14).toFloat();
+        if (newSetpoint >= 0 && newSetpoint <= 500) {
+            setpoint = newSetpoint;
+            Serial.print("ACK:Setpoint set to ");
+            Serial.print(setpoint);
+            Serial.println(" C");
+        } else {
+            Serial.println("ERROR:Invalid setpoint (range 0-500 C)");
+        }
+    }
+    
+    else if (cmd == "PID_ON") {
+        if (setpoint > 0) {
+            pidEnabled = true;
+            integral = 0;
+            previousError = 0;
+            lastTime = millis();
+            Serial.println("ACK:PID_ENABLED");
+        } else {
+            Serial.println("ERROR:Set setpoint before enabling PID");
+        }
+    }
+    
+    else if (cmd == "PID_OFF") {
+        pidEnabled = false;
+        analogWrite(heaterPin, 0);
+        integral = 0;
+        Serial.println("ACK:PID_DISABLED");
+    }
+    
+    else if (cmd.startsWith("PID_TUNE:")) {
+        int firstColon = cmd.indexOf(':');
+        int secondColon = cmd.indexOf(':', firstColon + 1);
+        int thirdColon = cmd.indexOf(':', secondColon + 1);
+        
+        if (secondColon > 0 && thirdColon > 0) {
+            Kp = cmd.substring(firstColon + 1, secondColon).toFloat();
+            Ki = cmd.substring(secondColon + 1, thirdColon).toFloat();
+            Kd = cmd.substring(thirdColon + 1).toFloat();
+            
+            Serial.print("ACK:PID_TUNED Kp=");
+            Serial.print(Kp);
+            Serial.print(" Ki=");
+            Serial.print(Ki);
+            Serial.print(" Kd=");
+            Serial.println(Kd);
+        } else {
+            Serial.println("ERROR:Invalid PID tune format");
+        }
+    }
+    
+    else if (cmd.startsWith("VALVE:")) {
+        int firstColon = cmd.indexOf(':');
+        int secondColon = cmd.indexOf(':', firstColon + 1);
+        
+        String valveName = cmd.substring(firstColon + 1, secondColon);
+        String action = cmd.substring(secondColon + 1);
+        
+        controlValve(valveName, action);
+    }
+    
+    else if (cmd == "START_PROCESS") {
+        processRunning = true;
+        Serial.println("started the process");
+    }
+    
+    else if (cmd == "STOP_PROCESS") {
+        processRunning = false;
+        Serial.println("stopped the process");
+    }
+    
+    else if (cmd == "TEST") {
+        Serial.println("did test");
+    }
+    
+    else if (cmd == "STATUS") {
+        sendStatus();
+    }
+    
+    else {
+        Serial.print("ERROR:Unknown command: ");
+        Serial.println(cmd);
+    }
+}
+
+void controlValve(String valveName, String action) {
+    bool state = (action == "OPEN");
+    int pin = -1;
+    
+    if (valveName == "Precursor_A") pin = valveA;
+    else if (valveName == "Precursor_B") pin = valveB;
+    else if (valveName == "Purge_Gas") pin = valvePurge;
+    else if (valveName == "Vacuum") pin = valveVacuum;
+    else if (valveName == "Vent") pin = valveVent;
+    
+    if (pin != -1) {
+        digitalWrite(pin, state ? HIGH : LOW);
+        Serial.print("ACK:Valve ");
+        Serial.print(valveName);
+        Serial.print(" ");
+        Serial.println(action);
+    } else {
+        Serial.print("ERROR:Unknown valve: ");
+        Serial.println(valveName);
+    }
+}
+
+void handleEmergencyStop() {
+    analogWrite(heaterPin, 0);
+    pidEnabled = false;
+    
+    digitalWrite(valveA, LOW);
+    digitalWrite(valveB, LOW);
+    digitalWrite(valvePurge, LOW);
+    digitalWrite(valveVacuum, LOW);
+    digitalWrite(valveVent, LOW);
+    
+    processRunning = false;
+    
+    Serial.println("E stop, everything should be off");
+    
+    while (emergencyStop) {
+        if (Serial.available()) {
+            String cmd = Serial.readStringUntil('\n');
+            cmd.trim();
+            if (cmd == "RESET_EMERGENCY") {
+                emergencyStop = false;
+                integral = 0;
+                previousError = 0;
+                Serial.println("good to go");
+                break;
+            }
+        }
+        delay(100);
+    }
+}
+
+void sendStatus() {
+    Serial.println("STATUS_START");
+    Serial.print("Temperature:");
+    Serial.println(currentTemp, 1);
+    Serial.print("Setpoint:");
+    Serial.println(setpoint, 1);
+    Serial.print("PID_Enabled:");
+    Serial.println(pidEnabled ? "YES" : "NO");
+    Serial.print("PID_Output:");
+    Serial.println(pidOutput);
+    Serial.print("Kp:");
+    Serial.print(Kp);
+    Serial.print(" Ki=");
+    Serial.print(Ki);
+    Serial.print(" Kd=");
+    Serial.println(Kd);
+    Serial.print("Process_Running:");
+    Serial.println(processRunning ? "YES" : "NO");
+    Serial.println("STATUS_END");
+}
