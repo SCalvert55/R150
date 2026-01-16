@@ -238,7 +238,8 @@ void controlValve(String valveName, String action) {
     else if (valveName == "Vent") pin = valveVent;
     
     if (pin != -1) {
-        digitalWrite(pin, state ? HIGH : LOW);
+        // Inverted logic for active-LOW relays
+        digitalWrite(pin, state ? LOW : HIGH);
         Serial.print("ACK:Valve ");
         Serial.print(valveName);
         Serial.print(" ");
@@ -248,7 +249,6 @@ void controlValve(String valveName, String action) {
         Serial.println(valveName);
     }
 }
-
 void handleEmergencyStop() {
     analogWrite(heaterPin, 0);
     pidEnabled = false;
