@@ -15,7 +15,7 @@ class ArduinoManager:
         self.connected = False
         self.reading_thread = None
         self.running = False
-        self.temp_data = {"Reactor": "--"}
+        self.temp_data = {"Reactor": "--", "Precursor_A": "--", "Precursor_B": "--", "Heater": "--"}
         self.callbacks = []
         
     def connect(self, port, baudrate=9600):
@@ -51,6 +51,16 @@ class ArduinoManager:
     def emergency_stop(self):
         self.send_command("EMERGENCY_STOP")
     
+    def get_temp(self, sensor_name):
+        """Get temperature for a specific sensor"""
+        temp_str = self.temp_data.get(sensor_name, "--")
+        if temp_str == "--":
+            return None
+        try:
+            return float(temp_str)
+        except:
+            return None
+    
     def _read_loop(self):
         while self.running:
             if self.serial_conn and self.serial_conn.in_waiting:
@@ -85,11 +95,12 @@ class ThermocoupleFrame(tk.LabelFrame):
         self.arduino_mgr = arduino_mgr
         self.labels = {}
         
-        for name in ["Reactor"]:
+        for name in ["Reactor", "Precursor_A", "Precursor_B", "Heater"]:
             frame = tk.Frame(self, bg="#f0f0f0")
             frame.pack(fill="x", pady=5)
             
-            tk.Label(frame, text=f"{name}:", font=("Arial", 12), 
+            display_name = name.replace("_", " ")
+            tk.Label(frame, text=f"{display_name}:", font=("Arial", 12), 
                     bg="#f0f0f0", width=12, anchor="w").pack(side="left")
             
             lbl = tk.Label(frame, text="-- °C", font=("Arial", 12, "bold"), 
@@ -189,7 +200,7 @@ class RecipeWindow(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("ALD Recipe Manager")
-        self.geometry("600x700")
+        self.geometry("600x800")
         self.configure(bg="#f0f0f0")
         
         self.recipes = self.load_recipes()
@@ -223,7 +234,10 @@ class RecipeWindow(tk.Toplevel):
             ("Precursor B", "precursor_b"),
             ("Pulse B Time (s)", "pulse_b"),
             ("Purge B Time (s)", "purge_b"),
-            ("Temperature Setpoint (°C)", "temp_setpoint"),
+            ("Reactor Temperature (°C)", "temp_reactor"),
+            ("Precursor A Temperature (°C)", "temp_precursor_a"),
+            ("Precursor B Temperature (°C)", "temp_precursor_b"),
+            ("Temperature Tolerance (°C)", "temp_tolerance"),
         ]
         
         for i, (label, key) in enumerate(fields):
@@ -231,7 +245,7 @@ class RecipeWindow(tk.Toplevel):
             row_frame.pack(fill="x", pady=5)
             
             tk.Label(row_frame, text=label, font=("Arial", 10),
-                    bg="#f0f0f0", width=25, anchor="w").pack(side="left")
+                    bg="#f0f0f0", width=30, anchor="w").pack(side="left")
             
             ent = tk.Entry(row_frame, font=("Arial", 10), width=20)
             ent.pack(side="left", padx=5)
@@ -282,6 +296,8 @@ class RecipeWindow(tk.Toplevel):
         
         messagebox.showinfo("Success", f"Recipe '{name}' saved successfully")
         self.selected.set(name)
+
+        
     
     def delete_recipe(self):
         name = self.selected.get()
@@ -327,42 +343,88 @@ class HeaterWindow(tk.Toplevel):
     def __init__(self, parent, arduino_mgr):
         super().__init__(parent)
         self.title("Heater Control")
-        self.geometry("400x300")
+        self.geometry("500x400")
         self.configure(bg="#f0f0f0")
         self.arduino_mgr = arduino_mgr
         
         tk.Label(self, text="Heater Control Panel", font=("Arial", 14, "bold"),
                 bg="#f0f0f0").pack(pady=15)
         
-        frame = tk.Frame(self, bg="#f0f0f0")
-        frame.pack(pady=10, padx=20, fill="x")
+        # Reactor heater
+        reactor_frame = tk.LabelFrame(self, text="Reactor Heater", 
+                                      font=("Arial", 11, "bold"), bg="#f0f0f0",
+                                      padx=15, pady=15)
+        reactor_frame.pack(pady=10, padx=20, fill="x")
+        
+        frame = tk.Frame(reactor_frame, bg="#f0f0f0")
+        frame.pack(pady=5)
         
         tk.Label(frame, text="Set Temperature (°C):", font=("Arial", 11),
                 bg="#f0f0f0").pack(side="left", padx=5)
         
-        self.temp_var = tk.StringVar()
-        temp_entry = tk.Entry(frame, textvariable=self.temp_var, font=("Arial", 10), width=10)
+        self.temp_reactor_var = tk.StringVar()
+        temp_entry = tk.Entry(frame, textvariable=self.temp_reactor_var, font=("Arial", 10), width=10)
         temp_entry.pack(side="left", padx=5)
         
-        tk.Button(frame, text="Set", command=self.set_temperature,
+        tk.Button(frame, text="Set", command=lambda: self.set_temperature("REACTOR", self.temp_reactor_var.get()),
+                 font=("Arial", 11), bg="#2196F3", fg="white",
+                 width=10).pack(side="left", padx=10)
+        
+        # Precursor A heater
+        precA_frame = tk.LabelFrame(self, text="Precursor A Heater", 
+                                    font=("Arial", 11, "bold"), bg="#f0f0f0",
+                                    padx=15, pady=15)
+        precA_frame.pack(pady=10, padx=20, fill="x")
+        
+        frame = tk.Frame(precA_frame, bg="#f0f0f0")
+        frame.pack(pady=5)
+        
+        tk.Label(frame, text="Set Temperature (°C):", font=("Arial", 11),
+                bg="#f0f0f0").pack(side="left", padx=5)
+        
+        self.temp_precA_var = tk.StringVar()
+        temp_entry = tk.Entry(frame, textvariable=self.temp_precA_var, font=("Arial", 10), width=10)
+        temp_entry.pack(side="left", padx=5)
+        
+        tk.Button(frame, text="Set", command=lambda: self.set_temperature("PRECURSOR_A", self.temp_precA_var.get()),
+                 font=("Arial", 11), bg="#2196F3", fg="white",
+                 width=10).pack(side="left", padx=10)
+        
+        # Precursor B heater
+        precB_frame = tk.LabelFrame(self, text="Precursor B Heater", 
+                                    font=("Arial", 11, "bold"), bg="#f0f0f0",
+                                    padx=15, pady=15)
+        precB_frame.pack(pady=10, padx=20, fill="x")
+        
+        frame = tk.Frame(precB_frame, bg="#f0f0f0")
+        frame.pack(pady=5)
+        
+        tk.Label(frame, text="Set Temperature (°C):", font=("Arial", 11),
+                bg="#f0f0f0").pack(side="left", padx=5)
+        
+        self.temp_precB_var = tk.StringVar()
+        temp_entry = tk.Entry(frame, textvariable=self.temp_precB_var, font=("Arial", 10), width=10)
+        temp_entry.pack(side="left", padx=5)
+        
+        tk.Button(frame, text="Set", command=lambda: self.set_temperature("PRECURSOR_B", self.temp_precB_var.get()),
                  font=("Arial", 11), bg="#2196F3", fg="white",
                  width=10).pack(side="left", padx=10)
     
-    def set_temperature(self):
-        temp = self.temp_var.get().strip()
-        if not temp.isdigit():
+    def set_temperature(self, heater_type, temp_str):
+        temp = temp_str.strip()
+        if not temp.replace('.', '').isdigit():
             messagebox.showerror("Error", "Please enter a valid temperature")
             return
         
-        cmd = f"TEMP_SETPOINT:{temp}"
+        cmd = f"TEMP_SETPOINT:{heater_type}:{temp}"
         self.arduino_mgr.send_command(cmd)
-        messagebox.showinfo("Success", f"Temperature setpoint to {temp} °C")
+        messagebox.showinfo("Success", f"{heater_type} setpoint set to {temp} °C")
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("ALD R150 Control System")
-        self.geometry("900x700")
+        self.geometry("900x750")
         self.configure(bg="#e0e0e0")
         
         self.arduino_mgr = ArduinoManager()
@@ -476,7 +538,7 @@ class App(tk.Tk):
                                      padx=15, pady=15)
         status_frame.pack(fill="both", expand=True, pady=10)
         
-        self.status_text = tk.Text(status_frame, height=10, font=("Courier", 10),
+        self.status_text = tk.Text(status_frame, height=8, font=("Courier", 10),
                                    bg="black", fg="#00ff00", state="disabled")
         self.status_text.pack(fill="both", expand=True)
         
@@ -548,16 +610,82 @@ class App(tk.Tk):
         recipe_data = recipes[recipe_name]
         recipe_data["name"] = recipe_name
         
-        if "temp_setpoint" not in recipe_data or not recipe_data["temp_setpoint"]:
-            raise Exception("Recipe missing temperature setpoint")
+        # Validate required fields
+        required = ["temp_reactor", "temp_precursor_a", "temp_precursor_b"]
+        for field in required:
+            if field not in recipe_data or not recipe_data[field]:
+                raise Exception(f"Recipe missing {field.replace('_', ' ')}")
         
         return recipe_data
+    
+    def wait_for_temperatures(self, recipe):
+        """Wait for all temperatures to reach their setpoints"""
+        self.log_message("Waiting for temperatures to stabilize...")
+        
+        target_reactor = float(recipe["temp_reactor"])
+        target_precA = float(recipe["temp_precursor_a"])
+        target_precB = float(recipe["temp_precursor_b"])
+        tolerance = float(recipe.get("temp_tolerance", 2.0))
+        
+        max_wait_time = 1800  # 30 minutes max
+        start_time = time.time()
+        check_interval = 2  # Check every 2 seconds
+        
+        while self.process_running:
+            if time.time() - start_time > max_wait_time:
+                raise Exception("Temperature stabilization timeout (30 min)")
+            
+            # Get current temperatures
+            temp_reactor = self.arduino_mgr.get_temp("Reactor")
+            temp_precA = self.arduino_mgr.get_temp("Precursor_A")
+            temp_precB = self.arduino_mgr.get_temp("Precursor_B")
+            
+            # Check if any reading is invalid
+            if temp_reactor is None or temp_precA is None or temp_precB is None:
+                self.log_message("Waiting for valid temperature readings...")
+                time.sleep(check_interval)
+                continue
+            
+            # Check if all temperatures are within tolerance
+            reactor_ok = abs(temp_reactor - target_reactor) <= tolerance
+            precA_ok = abs(temp_precA - target_precA) <= tolerance
+            precB_ok = abs(temp_precB - target_precB) <= tolerance
+            
+            # Log current status
+            self.log_message(f"Reactor: {temp_reactor:.1f}°C (target: {target_reactor}°C) {'✓' if reactor_ok else '✗'}")
+            self.log_message(f"Precursor A: {temp_precA:.1f}°C (target: {target_precA}°C) {'✓' if precA_ok else '✗'}")
+            self.log_message(f"Precursor B: {temp_precB:.1f}°C (target: {target_precB}°C) {'✓' if precB_ok else '✗'}")
+            
+            if reactor_ok and precA_ok and precB_ok:
+                self.log_message("All temperatures at setpoint! Starting recipe...")
+                return True
+            
+            time.sleep(check_interval)
+        
+        return False
     
     def run_recipe(self, recipe):
         try:
             self.log_message(f"Recipe: {recipe['name']}")
-            self.log_message(f"Temperature: {recipe['temp_setpoint']}°C")
+            self.log_message(f"Reactor Temp: {recipe['temp_reactor']}°C")
+            self.log_message(f"Precursor A Temp: {recipe['temp_precursor_a']}°C")
+            self.log_message(f"Precursor B Temp: {recipe['temp_precursor_b']}°C")
             self.log_message("=" * 50)
+            
+            # Set all temperature setpoints
+            self.arduino_mgr.send_command(f"TEMP_SETPOINT:REACTOR:{recipe['temp_reactor']}")
+            self.arduino_mgr.send_command(f"TEMP_SETPOINT:PRECURSOR_A:{recipe['temp_precursor_a']}")
+            self.arduino_mgr.send_command(f"TEMP_SETPOINT:PRECURSOR_B:{recipe['temp_precursor_b']}")
+            
+            # Enable PID controllers
+            self.arduino_mgr.send_command("PID_ON:REACTOR")
+            self.arduino_mgr.send_command("PID_ON:PRECURSOR_A")
+            self.arduino_mgr.send_command("PID_ON:PRECURSOR_B")
+            
+            # Wait for temperatures to stabilize
+            if not self.wait_for_temperatures(recipe):
+                self.log_message("Process cancelled during temperature stabilization")
+                return
             
             cycles = int(recipe.get("cycles", 1))
             pulse_a = float(recipe.get("pulse_a", 0.5))
@@ -615,7 +743,9 @@ class App(tk.Tk):
         finally:
             self.process_running = False
             self.start_btn.config(state="normal")
-            self.arduino_mgr.send_command("PID_OFF")
+            self.arduino_mgr.send_command("PID_OFF:REACTOR")
+            self.arduino_mgr.send_command("PID_OFF:PRECURSOR_A")
+            self.arduino_mgr.send_command("PID_OFF:PRECURSOR_B")
             self.arduino_mgr.send_command("STOP_PROCESS")
     
     def start_process(self):
@@ -635,8 +765,6 @@ class App(tk.Tk):
             
             self.log_message(f"Starting recipe: {recipe['name']}")
             
-            self.arduino_mgr.send_command(f"TEMP_SETPOINT:{recipe['temp_setpoint']}")
-            self.arduino_mgr.send_command("PID_ON")
             self.arduino_mgr.send_command("START_PROCESS")
             
             threading.Thread(target=self.run_recipe, args=(recipe,), daemon=True).start()
@@ -648,7 +776,9 @@ class App(tk.Tk):
                 self.start_btn.config(state="normal")
                 self.log_message("ALD process stopped")
                 self.arduino_mgr.send_command("STOP_PROCESS")
-                self.arduino_mgr.send_command("PID_OFF")
+                self.arduino_mgr.send_command("PID_OFF:REACTOR")
+                self.arduino_mgr.send_command("PID_OFF:PRECURSOR_A")
+                self.arduino_mgr.send_command("PID_OFF:PRECURSOR_B")
     
     def on_closing(self):
         if self.process_running:
