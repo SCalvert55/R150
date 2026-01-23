@@ -617,6 +617,40 @@ class App(tk.Tk):
                 raise Exception(f"Recipe missing {field.replace('_', ' ')}")
         
         return recipe_data
+    def check_temperatures_ready(self, recipe):
+        """Check if all temperatures are at their setpoints"""
+        target_reactor = float(recipe["temp_reactor"])
+        target_precA = float(recipe["temp_precursor_a"])
+        target_precB = float(recipe["temp_precursor_b"])
+        tolerance = float(recipe.get("temp_tolerance", 2.0))
+        
+        # Get current temperatures
+        temp_reactor = self.arduino_mgr.get_temp("Reactor")
+        temp_precA = self.arduino_mgr.get_temp("Precursor_A")
+        temp_precB = self.arduino_mgr.get_temp("Precursor_B")
+        
+        # Check if any reading is invalid
+        if temp_reactor is None or temp_precA is None or temp_precB is None:
+            self.log_message("Cannot verify temperatures - invalid readings")
+            return False
+        
+        # Check if all temperatures are within tolerance
+        reactor_ok = abs(temp_reactor - target_reactor) <= tolerance
+        precA_ok = abs(temp_precA - target_precA) <= tolerance
+        precB_ok = abs(temp_precB - target_precB) <= tolerance
+        
+        if reactor_ok and precA_ok and precB_ok:
+            self.log_message("All temperatures verified at setpoint ✓")
+            return True
+        else:
+            self.log_message("Temperatures not at setpoint:")
+            if not reactor_ok:
+                self.log_message(f"  Reactor: {temp_reactor:.1f}°C (need {target_reactor}°C)")
+            if not precA_ok:
+                self.log_message(f"  Precursor A: {temp_precA:.1f}°C (need {target_precA}°C)")
+            if not precB_ok:
+                self.log_message(f"  Precursor B: {temp_precB:.1f}°C (need {target_precB}°C)")
+            return False
     
     def wait_for_temperatures(self, recipe):
         """Wait for all temperatures to reach their setpoints"""
@@ -758,6 +792,18 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
+        
+        # NEW: Check if temperatures are at setpoint before starting
+        if not self.check_temperatures_ready(recipe):
+            if messagebox.askyesno("Temperature Warning", 
+                "Temperatures are not at setpoint yet.\n\n"
+                "Do you want to set the temperatures?\n\n"
+                "Click 'Yes' to start heating\n"
+                "Click 'No' to cancel"):
+                # User wants to wait - proceed with normal start
+                pass
+            else:
+                return
         
         if messagebox.askyesno("Confirm", f"Start recipe '{recipe['name']}'?"):
             self.process_running = True
