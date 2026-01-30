@@ -1,0 +1,47 @@
+import tkinter as tk
+import serial
+import threading
+
+try:
+        arduino = serial.Serial('COM5', 9600, timeout=1)
+except Exception as e:
+        print("Arduino connection failed:", e)
+        arduino = None
+
+
+def send_command(command):
+    if arduino and arduino.is_open:
+        try:
+            arduino.write(command.encode())
+            print(f"Sent command: {command}")
+        except Exception as e:
+            print("Failed to send command:", e)
+
+
+root = tk.Tk()
+root.title("Heater Control")
+root.geometry("600x300")
+
+
+if not arduino:
+    warning_box = tk.Frame(root, bg="white", bd=3, relief="ridge", padx=10, pady=10)
+    warning_box.grid(row=1, column=6, sticky="n", padx=20, pady=20)  # Put it in column 3 (right side)
+        
+    tk.Label(warning_box, text="⚠️ Arduino not connected", fg="red", font=("Arial", 12, "bold"), bg="white").pack()
+elif arduino:
+    success = tk.Frame(root, bg="white", bd=3, relief="ridge", padx=20, pady=20)
+    success.grid(row=6, column=1, sticky="n", padx=20, pady=20)  # Put it in column 3 (right side)
+        
+    succBox = tk.Label(success, text="✅ Arduino  connected", fg="green",font=("Arial", 12, "bold"), bg="white").pack()
+
+
+Button_on = tk.Button(root, text="Turn Heater ON", command=lambda: send_command('1'), bg='green', fg='white', font=('Arial', 14))
+Button_on.grid(row=1, column=0, pady=10)
+
+Button_off = tk.Button(root, text="Turn Heater OFF", command=lambda: send_command('0'), bg='red', fg='white', font=('Arial', 14))
+Button_off.grid(row=2, column=0, pady=10)
+
+
+
+
+root.mainloop()

@@ -1,0 +1,447 @@
+#include <Arduino.h>
+#include <max6675.h>
+
+// Thermocouple pins for MAX6675 modules
+const int reactor_cs = 10;
+const int precA_cs = 8;
+const int precB_cs = 7;
+const int heater_cs = 15;  // Heater monitoring thermocouple
+const int shared_clk = 13;
+const int shared_do = 12;
+
+MAX6675 thermoReactor(shared_clk, reactor_cs, shared_do);
+MAX6675 thermoPrecA(shared_clk, precA_cs, shared_do);
+MAX6675 thermoPrecB(shared_clk, precB_cs, shared_do);
+MAX6675 thermoHeater(shared_clk, heater_cs, shared_do);
+
+// Heater control pins (PWM)
+const int heaterReactor = 9;
+const int heaterPrecA = 6;
+const int heaterPrecB = 5;
+
+// Valve pins
+const int valveA = 2;
+const int valveB = 3;
+const int valvePurge = 4;
+const int valveVacuum = 11;
+const int valveVent = 14;
+
+// PID Controller structure
+struct PIDController {
+    double setpoint;
+    double currentTemp;
+    double output;
+    double Kp;
+    double Ki;
+    double Kd;
+    double integral;
+    double previousError;
+    unsigned long lastTime;
+    bool enabled;
+    int heaterPin;
+    String name;
+};
+
+// Create three PID controllers
+PIDController reactorPID = {0, 0, 0, 2.0, 0.5, 1.0, 0, 0, 0, false, heaterReactor, "REACTOR"};
+PIDController precAPID = {0, 0, 0, 2.0, 0.5, 1.0, 0, 0, 0, false, heaterPrecA, "PRECURSOR_A"};
+PIDController precBPID = {0, 0, 0, 2.0, 0.5, 1.0, 0, 0, 0, false, heaterPrecB, "PRECURSOR_B"};
+
+bool emergencyStop = false;
+bool processRunning = false;
+
+unsigned long lastTempRead = 0;
+const int tempReadInterval = 500;
+
+void setup() {
+    Serial.begin(9600);
+    
+    // Setup heater pins
+    pinMode(heaterReactor, OUTPUT);
+    pinMode(heaterPrecA, OUTPUT);
+    pinMode(heaterPrecB, OUTPUT);
+    analogWrite(heaterReactor, 0);
+    analogWrite(heaterPrecA, 0);
+    analogWrite(heaterPrecB, 0);
+    
+    // Setup valve pins
+    pinMode(valveA, OUTPUT);
+    pinMode(valveB, OUTPUT);
+    pinMode(valvePurge, OUTPUT);
+    pinMode(valveVacuum, OUTPUT);
+    pinMode(valveVent, OUTPUT);
+    
+    digitalWrite(valveA, HIGH);  // Active-LOW relays
+    digitalWrite(valveB, HIGH);
+    digitalWrite(valvePurge, HIGH);
+    digitalWrite(valveVacuum, HIGH);
+    digitalWrite(valveVent, HIGH);
+    
+    Serial.println("ALD Multi-Heater Controller Ready");
+}
+
+void loop() {
+    if (emergencyStop) {
+        handleEmergencyStop();
+        return;
+    }
+    
+    if (millis() - lastTempRead >= tempReadInterval) {
+        lastTempRead = millis();
+        readAndControlAllTemperatures();
+    }
+    
+    if (Serial.available()) {
+        String command = Serial.readStringUntil('\n');
+        command.trim();
+        handleCommand(command);
+    }
+}
+
+void readAndControlAllTemperatures() {
+    // Read Reactor temperature
+    reactorPID.currentTemp = thermoReactor.readCelsius();
+    if (!isnan(reactorPID.currentTemp)) {
+        Serial.print("TEMP:Reactor:");
+        Serial.println(reactorPID.currentTemp, 1);
+        controlHeater(&reactorPID);
+    } else {
+        Serial.println("ERROR:Invalid Reactor temp reading");
+        if (reactorPID.enabled) {
+            analogWrite(reactorPID.heaterPin, 0);
+            reactorPID.enabled = false;
+        }
+    }
+    
+    // Read Precursor A temperature
+    precAPID.currentTemp = thermoPrecA.readCelsius();
+    if (!isnan(precAPID.currentTemp)) {
+        Serial.print("TEMP:Precursor_A:");
+        Serial.println(precAPID.currentTemp, 1);
+        controlHeater(&precAPID);
+    } else {
+        Serial.println("ERROR:Invalid Precursor A temp reading");
+        if (precAPID.enabled) {
+            analogWrite(precAPID.heaterPin, 0);
+            precAPID.enabled = false;
+        }
+    }
+    
+    // Read Precursor B temperature
+    precBPID.currentTemp = thermoPrecB.readCelsius();
+    if (!isnan(precBPID.currentTemp)) {
+        Serial.print("TEMP:Precursor_B:");
+        Serial.println(precBPID.currentTemp, 1);
+        controlHeater(&precBPID);
+    } else {
+        Serial.println("ERROR:Invalid Precursor B temp reading");
+        if (precBPID.enabled) {
+            analogWrite(precBPID.heaterPin, 0);
+            precBPID.enabled = false;
+        }
+    }
+    
+    // Read Heater monitoring temperature (no control, just monitoring)
+    double heaterTemp = thermoHeater.readCelsius();
+    if (!isnan(heaterTemp)) {
+        Serial.print("TEMP:Heater:");
+        Serial.println(heaterTemp, 1);
+    } else {
+        Serial.println("ERROR:Invalid Heater temp reading");
+    }
+}
+
+void controlHeater(PIDController* pid) {
+    if (pid->enabled && pid->setpoint > 0) {
+        pid->output = calculatePID(pid);
+        analogWrite(pid->heaterPin, (int)pid->output);
+    } else {
+        analogWrite(pid->heaterPin, 0);
+        pid->output = 0;
+    }
+}
+
+double calculatePID(PIDController* pid) {
+    unsigned long currentTime = millis();
+    double deltaTime = (currentTime - pid->lastTime) / 1000.0;
+    
+    if (deltaTime <= 0) {
+        return pid->output;
+    }
+    
+    double error = pid->setpoint - pid->currentTemp;
+    
+    double P = pid->Kp * error;
+    
+    pid->integral += error * deltaTime;
+    if (pid->integral > 255) pid->integral = 255;
+    if (pid->integral < -255) pid->integral = -255;
+    double I = pid->Ki * pid->integral;
+    
+    double derivative = (error - pid->previousError) / deltaTime;
+    double D = pid->Kd * derivative;
+    
+    double output = P + I + D;
+    
+    if (output > 255) output = 255;
+    if (output < 0) output = 0;
+    
+    pid->previousError = error;
+    pid->lastTime = currentTime;
+    
+    return output;
+}
+
+PIDController* getPIDController(String heaterType) {
+    if (heaterType == "REACTOR") return &reactorPID;
+    else if (heaterType == "PRECURSOR_A") return &precAPID;
+    else if (heaterType == "PRECURSOR_B") return &precBPID;
+    return nullptr;
+}
+
+void handleCommand(String cmd) {
+    Serial.print("CMD_RECEIVED:");
+    Serial.println(cmd);
+    
+    if (cmd == "EMERGENCY_STOP") {
+        emergencyStop = true;
+        handleEmergencyStop();
+        Serial.println("ACK:EMERGENCY_STOP_ACTIVATED");
+    }
+    
+    else if (cmd.startsWith("TEMP_SETPOINT:")) {
+        int firstColon = cmd.indexOf(':');
+        int secondColon = cmd.indexOf(':', firstColon + 1);
+        
+        if (secondColon > 0) {
+            String heaterType = cmd.substring(firstColon + 1, secondColon);
+            double newSetpoint = cmd.substring(secondColon + 1).toFloat();
+            
+            PIDController* pid = getPIDController(heaterType);
+            if (pid != nullptr) {
+                if (newSetpoint >= 0 && newSetpoint <= 500) {
+                    pid->setpoint = newSetpoint;
+                    Serial.print("ACK:");
+                    Serial.print(heaterType);
+                    Serial.print(" setpoint set to ");
+                    Serial.print(newSetpoint);
+                    Serial.println(" C");
+                } else {
+                    Serial.println("ERROR:Invalid setpoint (range 0-500 C)");
+                }
+            } else {
+                Serial.print("ERROR:Unknown heater type: ");
+                Serial.println(heaterType);
+            }
+        }
+    }
+    
+    else if (cmd.startsWith("PID_ON:")) {
+        String heaterType = cmd.substring(7);
+        PIDController* pid = getPIDController(heaterType);
+        
+        if (pid != nullptr) {
+            if (pid->setpoint > 0) {
+                pid->enabled = true;
+                pid->integral = 0;
+                pid->previousError = 0;
+                pid->lastTime = millis();
+                Serial.print("ACK:");
+                Serial.print(heaterType);
+                Serial.println(" PID_ENABLED");
+            } else {
+                Serial.print("ERROR:");
+                Serial.print(heaterType);
+                Serial.println(" - Set setpoint before enabling PID");
+            }
+        } else {
+            Serial.print("ERROR:Unknown heater type: ");
+            Serial.println(heaterType);
+        }
+    }
+    
+    else if (cmd.startsWith("PID_OFF:")) {
+        String heaterType = cmd.substring(8);
+        PIDController* pid = getPIDController(heaterType);
+        
+        if (pid != nullptr) {
+            pid->enabled = false;
+            analogWrite(pid->heaterPin, 0);
+            pid->integral = 0;
+            Serial.print("ACK:");
+            Serial.print(heaterType);
+            Serial.println(" PID_DISABLED");
+        } else {
+            Serial.print("ERROR:Unknown heater type: ");
+            Serial.println(heaterType);
+        }
+    }
+    
+    else if (cmd.startsWith("PID_TUNE:")) {
+        int firstColon = cmd.indexOf(':');
+        int secondColon = cmd.indexOf(':', firstColon + 1);
+        int thirdColon = cmd.indexOf(':', secondColon + 1);
+        int fourthColon = cmd.indexOf(':', thirdColon + 1);
+        
+        if (fourthColon > 0) {
+            String heaterType = cmd.substring(firstColon + 1, secondColon);
+            double kp = cmd.substring(secondColon + 1, thirdColon).toFloat();
+            double ki = cmd.substring(thirdColon + 1, fourthColon).toFloat();
+            double kd = cmd.substring(fourthColon + 1).toFloat();
+            
+            PIDController* pid = getPIDController(heaterType);
+            if (pid != nullptr) {
+                pid->Kp = kp;
+                pid->Ki = ki;
+                pid->Kd = kd;
+                
+                Serial.print("ACK:");
+                Serial.print(heaterType);
+                Serial.print(" PID_TUNED Kp=");
+                Serial.print(kp);
+                Serial.print(" Ki=");
+                Serial.print(ki);
+                Serial.print(" Kd=");
+                Serial.println(kd);
+            } else {
+                Serial.print("ERROR:Unknown heater type: ");
+                Serial.println(heaterType);
+            }
+        } else {
+            Serial.println("ERROR:Invalid PID tune format");
+        }
+    }
+    
+    else if (cmd.startsWith("VALVE:")) {
+        int firstColon = cmd.indexOf(':');
+        int secondColon = cmd.indexOf(':', firstColon + 1);
+        
+        String valveName = cmd.substring(firstColon + 1, secondColon);
+        String action = cmd.substring(secondColon + 1);
+        
+        controlValve(valveName, action);
+    }
+    
+    else if (cmd == "START_PROCESS") {
+        processRunning = true;
+        Serial.println("ACK:Process started");
+    }
+    
+    else if (cmd == "STOP_PROCESS") {
+        processRunning = false;
+        Serial.println("ACK:Process stopped");
+    }
+    
+    else if (cmd == "TEST") {
+        Serial.println("ACK:Test successful");
+    }
+    
+    else if (cmd == "STATUS") {
+        sendStatus();
+    }
+    
+    else {
+        Serial.print("ERROR:Unknown command: ");
+        Serial.println(cmd);
+    }
+}
+
+void controlValve(String valveName, String action) {
+    bool state = (action == "OPEN");
+    int pin = -1;
+    
+    if (valveName == "Precursor_A") pin = valveA;
+    else if (valveName == "Precursor_B") pin = valveB;
+    else if (valveName == "Purge_Gas") pin = valvePurge;
+    else if (valveName == "Vacuum") pin = valveVacuum;
+    else if (valveName == "Vent") pin = valveVent;
+    
+    if (pin != -1) {
+        // Inverted logic for active-LOW relays
+        digitalWrite(pin, state ? LOW : HIGH);
+        Serial.print("ACK:Valve ");
+        Serial.print(valveName);
+        Serial.print(" ");
+        Serial.println(action);
+    } else {
+        Serial.print("ERROR:Unknown valve: ");
+        Serial.println(valveName);
+    }
+}
+
+void handleEmergencyStop() {
+    // Disable all heaters
+    analogWrite(heaterReactor, 0);
+    analogWrite(heaterPrecA, 0);
+    analogWrite(heaterPrecB, 0);
+    
+    reactorPID.enabled = false;
+    precAPID.enabled = false;
+    precBPID.enabled = false;
+    
+    // Close all valves
+    digitalWrite(valveA, HIGH);
+    digitalWrite(valveB, HIGH);
+    digitalWrite(valvePurge, HIGH);
+    digitalWrite(valveVacuum, HIGH);
+    digitalWrite(valveVent, HIGH);
+    
+    processRunning = false;
+    
+    Serial.println("EMERGENCY_STOP:All systems disabled");
+    
+    while (emergencyStop) {
+        if (Serial.available()) {
+            String cmd = Serial.readStringUntil('\n');
+            cmd.trim();
+            if (cmd == "RESET_EMERGENCY") {
+                emergencyStop = false;
+                reactorPID.integral = 0;
+                reactorPID.previousError = 0;
+                precAPID.integral = 0;
+                precAPID.previousError = 0;
+                precBPID.integral = 0;
+                precBPID.previousError = 0;
+                Serial.println("ACK:Emergency reset - system ready");
+                break;
+            }
+        }
+        delay(100);
+    }
+}
+
+void sendStatus() {
+    Serial.println("STATUS_START");
+    
+    Serial.print("Reactor_Temp:");
+    Serial.println(reactorPID.currentTemp, 1);
+    Serial.print("Reactor_Setpoint:");
+    Serial.println(reactorPID.setpoint, 1);
+    Serial.print("Reactor_PID:");
+    Serial.println(reactorPID.enabled ? "ON" : "OFF");
+    Serial.print("Reactor_Output:");
+    Serial.println(reactorPID.output);
+    
+    Serial.print("PrecA_Temp:");
+    Serial.println(precAPID.currentTemp, 1);
+    Serial.print("PrecA_Setpoint:");
+    Serial.println(precAPID.setpoint, 1);
+    Serial.print("PrecA_PID:");
+    Serial.println(precAPID.enabled ? "ON" : "OFF");
+    Serial.print("PrecA_Output:");
+    Serial.println(precAPID.output);
+    
+    Serial.print("PrecB_Temp:");
+    Serial.println(precBPID.currentTemp, 1);
+    Serial.print("PrecB_Setpoint:");
+    Serial.println(precBPID.setpoint, 1);
+    Serial.print("PrecB_PID:");
+    Serial.println(precBPID.enabled ? "ON" : "OFF");
+    Serial.print("PrecB_Output:");
+    Serial.println(precBPID.output);
+    
+    Serial.print("Process_Running:");
+    Serial.println(processRunning ? "YES" : "NO");
+    
+    Serial.println("STATUS_END");
+}
