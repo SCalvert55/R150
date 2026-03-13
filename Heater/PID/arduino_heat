@@ -1,0 +1,176 @@
+#include <Arduino.h>
+#include <max6675.h>
+
+const int reactor_cs = 10;
+const int precA_cs = 8;
+const int precB_cs = 7;
+const int clk = 13;
+const int pin_do = 12;
+
+MAX6675 Reactor(clk, reactor_cs, pin_do);
+MAX6675 PrecA(clk, precA_cs, pin_do);
+MAX6675 PrecB(clk, precB_cs, pin_do);
+
+const int heaterReactor = 9;
+const int heaterPrecA = 6;
+const int heaterPrecB = 5;
+
+const int valveA = 2;
+const int valveB = 3;
+const int valvePurge = 4;
+const int valveVacuum = 11;
+const int valveVent = 14;
+
+double reactorSetpoint = 0;
+double precASetpoint = 0;
+double precBSetpoint = 0;
+double reactorTemp = 0;
+double precATemp = 0;
+double precBTemp = 0;
+
+bool reactorOn = false;
+bool precAOn = false;
+bool precBOn = false;
+bool emergencyStop = false;
+
+void setup() {
+    Serial.begin(9600);
+
+    pinMode(heaterReactor, OUTPUT);
+    pinMode(heaterPrecA, OUTPUT);
+    pinMode(heaterPrecB, OUTPUT);
+
+    digitalWrite(heaterReactor, LOW);
+    digitalWrite(heaterPrecA, LOW);
+    digitalWrite(heaterPrecB, LOW);
+
+    pinMode(valveA, OUTPUT);
+    pinMode(valveB, OUTPUT);
+    pinMode(valvePurge, OUTPUT);
+    pinMode(valveVacuum, OUTPUT);
+    pinMode(valveVent, OUTPUT);
+
+    digitalWrite(valveA, HIGH);
+    digitalWrite(valveB, HIGH);
+    digitalWrite(valvePurge, HIGH);
+    digitalWrite(valveVacuum, HIGH);
+    digitalWrite(valveVent, HIGH);
+
+    Serial.println("READY");
+}
+
+void loop() {
+    if (emergencyStop) {
+        while (true) {
+            if (Serial.available()) {
+                String cmd = Serial.readStringUntil('\n');
+                cmd.trim();
+                if (cmd == "RESET") {
+                    emergencyStop = false;
+                    Serial.println("Reset");
+                    break;
+                }
+            }
+            delay(100);
+        }
+        return;
+    }
+
+    reactorTemp = Reactor.readCelsius();
+    precATemp = PrecA.readCelsius();
+    precBTemp = PrecB.readCelsius();
+
+    Serial.print("R:");
+    Serial.print(reactorTemp);
+    Serial.print(" A:");
+    Serial.print(precATemp);
+    Serial.print(" B:");
+    Serial.println(precBTemp);
+
+    if (reactorOn && reactorTemp < reactorSetpoint) {
+        digitalWrite(heaterReactor, HIGH);
+    } else {
+        digitalWrite(heaterReactor, LOW);
+    }
+
+    if (precAOn && precATemp < precASetpoint) {
+        digitalWrite(heaterPrecA, HIGH);
+    } else {
+        digitalWrite(heaterPrecA, LOW);
+    }
+
+    if (precBOn && precBTemp < precBSetpoint) {
+        digitalWrite(heaterPrecB, HIGH);
+    } else {
+        digitalWrite(heaterPrecB, LOW);
+    }
+
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+
+        if (cmd.startsWith("R:")) {
+            reactorSetpoint = cmd.substring(2).toFloat();
+            reactorOn = true;
+            Serial.print("Reactor set to ");
+            Serial.println(reactorSetpoint);
+        }
+        else if (cmd.startsWith("A:")) {
+            precASetpoint = cmd.substring(2).toFloat();
+            precAOn = true;
+            Serial.print("PrecA set to ");
+            Serial.println(precASetpoint);
+        }
+        else if (cmd.startsWith("B:")) {
+            precBSetpoint = cmd.substring(2).toFloat();
+            precBOn = true;
+            Serial.print("PrecB set to ");
+            Serial.println(precBSetpoint);
+        }
+        else if (cmd.startsWith("VALVE:")) {
+            int c = cmd.indexOf(':', 6);
+            String valve = cmd.substring(6, c);
+            String action = cmd.substring(c + 1);
+            bool open = (action == "OPEN");
+            int pin = -1;
+            if      (valve == "Precursor_A") pin = valveA;
+            else if (valve == "Precursor_B") pin = valveB;
+            else if (valve == "Purge_Gas")   pin = valvePurge;
+            else if (valve == "Vacuum")      pin = valveVacuum;
+            else if (valve == "Vent")        pin = valveVent;
+            if (pin != -1) {
+                digitalWrite(pin, open ? LOW : HIGH);
+                Serial.print("Valve ");
+                Serial.print(valve);
+                Serial.print(" ");
+                Serial.println(action);
+            }
+        }
+        else if (cmd == "STOP") {
+            reactorOn = false;
+            precAOn = false;
+            precBOn = false;
+            digitalWrite(heaterReactor, LOW);
+            digitalWrite(heaterPrecA, LOW);
+            digitalWrite(heaterPrecB, LOW);
+            Serial.println("All stopped");
+        }
+        else if (cmd == "EMERGENCY_STOP") {
+            emergencyStop = true;
+            reactorOn = false;
+            precAOn = false;
+            precBOn = false;
+            digitalWrite(heaterReactor, LOW);
+            digitalWrite(heaterPrecA, LOW);
+            digitalWrite(heaterPrecB, LOW);
+            digitalWrite(valveA, HIGH);
+            digitalWrite(valveB, HIGH);
+            digitalWrite(valvePurge, HIGH);
+            digitalWrite(valveVacuum, HIGH);
+            digitalWrite(valveVent, HIGH);
+            Serial.println("EMERGENCY STOP");
+        }
+    }
+
+    delay(500);
+}

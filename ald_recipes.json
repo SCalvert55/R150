@@ -1,0 +1,41 @@
+{
+    "sam": {
+        "cycles": "",
+        "precursor_a": "",
+        "pulse_a": "",
+        "purge_a": "",
+        "precursor_b": "",
+        "pulse_b": "",
+        "purge_b": "",
+        "temp_reactor": "",
+        "temp_precursor_a": "",
+        "temp_precursor_b": "",
+        "temp_tolerance": ""
+    },
+    "sam test": {
+        "cycles": "10",
+        "precursor_a": "eggs",
+        "pulse_a": "1",
+        "purge_a": "1",
+        "precursor_b": "egg2",
+        "pulse_b": "1",
+        "purge_b": "1",
+        "temp_reactor": "150",
+        "temp_precursor_a": "",
+        "temp_precursor_b": "",
+        "temp_tolerance": "10"
+    },
+    "test2heaters": {
+        "cycles": "10",
+        "precursor_a": "nothing",
+        "pulse_a": "1",
+        "purge_a": "1",
+        "precursor_b": "everything",
+        "pulse_b": "1",
+        "purge_b": "1",
+        "temp_reactor": "",
+        "temp_precursor_a": "",
+        "temp_precursor_b": "25",
+        "temp_tolerance": "10"
+    }
+}
