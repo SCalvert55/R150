@@ -473,10 +473,8 @@ class App(tk.Tk):
         toolbar = tk.Frame(self, bg="#263238", height=50)
         toolbar.pack(fill="x", side="top")
 
-        btn_style = dict(
-            font=("Arial", 11, "bold"), bg="#37474F", fg="white",
-            activebackground="#546E7A", activeforeground="white",
-            bd=0, padx=7, pady=8, cursor="hand2")
+        btn_style = dict( font=("Arial", 11, "bold"), bg="#37474F", fg="white",
+            activebackground="#546E7A", activeforeground="white",bd=0, padx=7, pady=8, cursor="hand2")
 
         tk.Button(toolbar, text="⚙ Valves",
                   command=self.open_valves, **btn_style).pack(
@@ -684,7 +682,7 @@ class App(tk.Tk):
         target_r  = float(recipe["temp_reactor"])
         target_pa = float(recipe["temp_precursor_a"])
         target_pb = float(recipe["temp_precursor_b"])
-        tol       = float(recipe.get("temp_tolerance", 2.0))
+        tol = float(recipe.get("temp_tolerance", 2.0))
 
         tr  = self.arduino_mgr.get_temp("Reactor")
         tpa = self.arduino_mgr.get_temp("Precursor_A")
@@ -716,7 +714,7 @@ class App(tk.Tk):
         target_r  = float(recipe["temp_reactor"])
         target_pa = float(recipe["temp_precursor_a"])
         target_pb = float(recipe["temp_precursor_b"])
-        tol       = float(recipe.get("temp_tolerance", 2.0))
+        tol = float(recipe.get("temp_tolerance", 2.0))
 
         deadline = time.time() + 1800   # 30-minute max
         while self.process_running:
@@ -774,7 +772,7 @@ class App(tk.Tk):
 
             # Wait for stabilisation
             if not self._wait_for_temperatures(recipe):
-                self.log_message("Process cancelled during temperature stabilisation")
+                self.log_message("Process waiting for temps")
                 return
 
             cycles  = int(recipe.get("cycles", 1))
@@ -787,7 +785,7 @@ class App(tk.Tk):
 
             for cycle in range(1, cycles + 1):
                 if not self.process_running:
-                    self.log_message("Process stopped by user")
+                    self.log_message("Process stopped")
                     break
 
                 self.log_message(f"── Cycle {cycle}/{cycles} ──")
@@ -846,11 +844,7 @@ class App(tk.Tk):
             return
 
         if not self.check_temperatures_ready(recipe):
-            answer = messagebox.askyesno(
-                "Temperature Warning",
-                "Temperatures are not at setpoint.\n\n"
-                "Click Yes to start heating.\n"
-                "Click No to cancel.")
+            answer = messagebox.askyesno( "Temperature Warning","Temperatures are not at setpoint.\n\n" "Click Yes to start heating.\n" "Click No to cancel.")
             if not answer:
                 return
 
@@ -885,17 +879,13 @@ class App(tk.Tk):
             self._setpoints[k] = None
         self._overheated.clear()
         self.start_btn.config(state="normal")
-        messagebox.showwarning(
-            "Emergency Stop",
-            "Emergency stop executed!\nAll processes halted.")
+        messagebox.showwarning("Emergency Stop", "Emergency stop executed! All processes halted.")
 
     # Close
 
     def on_closing(self):
         if self.process_running:
-            if not messagebox.askyesno(
-                    "Warning",
-                    "Process is running! Are you sure you want to exit?"):
+            if not messagebox.askyesno("Warning", "Process is running! Are you sure you want to exit?"):
                 return
         self.arduino_mgr.disconnect()
         self.destroy()
