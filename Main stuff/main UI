@@ -264,11 +264,15 @@ class RecipeWindow(tk.Toplevel):
                               lambda e: self.load_recipe(self.selected.get()))
 
         fields_frame = tk.LabelFrame(self, text="Recipe Parameters",
-                                     font=("Arial", 11, "bold"), bg="#f0f0f0",
-                                     padx=15, pady=15)
+        font=("Arial", 11, "bold"), bg="#f0f0f0",
+        padx=15, pady=15)
         fields_frame.pack(pady=10, padx=20, fill="both", expand=True)
 
         self.entries = {}
+
+
+        #If we want to add more valves or anything, they need to get added to the fields array. I wasn't sure how to add more functionality to add more options
+        #from inside the GUI, but that could be a next step type thing.
 
         fields = [
             ("Recipe Name", "name"),
